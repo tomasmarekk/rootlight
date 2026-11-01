@@ -895,15 +895,45 @@ pub(crate) fn open_rdf_partition_reader(
     connection
         .execute_batch("BEGIN")
         .map_err(CatalogError::sqlite)?;
-    let physical_bytes = pragma_nonnegative_u64(&connection, "page_count")?
-        .checked_mul(pragma_nonnegative_u64(&connection, "page_size")?)
+    validate_rdf_partition_size(&connection, maximum_bytes, context)?;
+    validate_schema(&connection, &rdf_partition_definition())?;
+    install_authorizer(&connection)?;
+    validate_integrity(&connection, Some(context))?;
+    Ok(connection)
+}
+
+pub(crate) fn validate_rdf_partition_size(
+    connection: &Connection,
+    maximum_bytes: u64,
+    context: &GenerationContext<'_>,
+) -> Result<(), CatalogError> {
+    context.check().map_err(CatalogError::control)?;
+    let physical_bytes = pragma_nonnegative_u64(connection, "page_count")?
+        .checked_mul(pragma_nonnegative_u64(connection, "page_size")?)
         .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
     if physical_bytes > maximum_bytes {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt));
     }
+    context.check().map_err(CatalogError::control)
+}
+
+pub(crate) fn open_rdf_partition_staging_writer(
+    path: &Path,
+    context: &GenerationContext<'_>,
+) -> Result<Connection, CatalogError> {
+    require_private_file_boundary()?;
+    validate_private_file(path)?;
+    let flags =
+        private_sqlite_flags(OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX);
+    let connection = Connection::open_with_flags(path, flags).map_err(CatalogError::sqlite)?;
+    configure_limits(&connection)?;
+    install_generation_cancellation(&connection, context)?;
+    verify_sqlite(&connection)?;
+    configure_common(&connection)?;
+    // A foreign file must be rejected before changing its journal configuration.
     validate_schema(&connection, &rdf_partition_definition())?;
+    configure_writer(&connection, JournalMode::Delete)?;
     install_authorizer(&connection)?;
-    validate_integrity(&connection, Some(context))?;
     Ok(connection)
 }
 

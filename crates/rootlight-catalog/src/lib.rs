@@ -14,7 +14,7 @@ mod read;
 mod schema;
 mod write;
 pub use layout_census::{OracleLayoutCensus, OracleLayoutFragment, OracleLayoutPreview};
-pub use rdf_partition::{RdfPartitionReader, RdfPartitionWriter};
+pub use rdf_partition::{RdfPartitionReader, RdfPartitionStage, RdfPartitionWriter};
 
 #[cfg(test)]
 extern crate self as rootlight_catalog;

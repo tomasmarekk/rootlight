@@ -242,12 +242,12 @@ fn default_context<'a>(cancellation: &'a Cancellation) -> GenerationContext<'a> 
     GenerationContext::new(cancellation, GenerationBudget::default())
 }
 
-fn rdf_partition_parent(
+fn rdf_partition_parent_document(
     file_count: usize,
     text: &str,
     statement_count: usize,
     configuration: &[u8],
-) -> IdentityVerifiedGeneration {
+) -> (GenerationMetadata, rootlight_ir::NormalizedIrDocument) {
     let repository = derive_repository(b"catalog-rdf-partition").id();
     let configuration_hash = content_hash(configuration);
     let provider_set_hash = content_hash(b"catalog-rdf-partition-producer");
@@ -356,6 +356,17 @@ fn rdf_partition_parent(
         );
     }
     document.provenance.push(provenance);
+    (metadata, document)
+}
+
+fn rdf_partition_parent(
+    file_count: usize,
+    text: &str,
+    statement_count: usize,
+    configuration: &[u8],
+) -> IdentityVerifiedGeneration {
+    let (metadata, document) =
+        rdf_partition_parent_document(file_count, text, statement_count, configuration);
     let cancellation = Cancellation::new();
     IdentityVerifiedGeneration::verify(
         metadata,
@@ -374,6 +385,15 @@ fn rdf_partition_records(
     count: usize,
 ) -> Vec<rootlight_ir::ExtensionEnvelope> {
     let file = parent.snapshot().find_file(file).unwrap();
+    rdf_partition_records_claimed(parent.metadata(), file, text, count)
+}
+
+fn rdf_partition_records_claimed(
+    metadata: GenerationMetadata,
+    file: &FileRecord,
+    text: &str,
+    count: usize,
+) -> Vec<rootlight_ir::ExtensionEnvelope> {
     let predicate_start = text.find('<').unwrap();
     let predicate_end = text.find('>').unwrap() + 1;
     let object_start = predicate_end + 1;
@@ -390,8 +410,8 @@ fn rdf_partition_records(
                 .unwrap()
             };
             let source = SourceRef::new(
-                parent.metadata().repository(),
-                parent.metadata().generation(),
+                metadata.repository(),
+                metadata.generation(),
                 span(0, text.len()),
                 file.content_hash,
                 Some(
@@ -473,6 +493,325 @@ fn rdf_partition_cold_pages_preserve_typed_records_and_source_hints() {
     assert!(exhausted.items().is_empty());
     assert_eq!(exhausted.total_available(), 5);
     assert_eq!(exhausted.completeness(), ReadPageCompleteness::Complete);
+}
+
+#[test]
+fn unpublished_rdf_stage_drops_input_before_full_parent_and_cold_eof() {
+    use crate::{RdfPartitionReader, RdfPartitionStage};
+    use rootlight_storage::{UnpublishedRdfPartition, VerifiedRdfPartition};
+    let text = "_:a <urn:p> \"caf\\u00E9\"@en .";
+    let (metadata, document) = rdf_partition_parent_document(2, text, 5, b"unpublished-rdf");
+    let file = document.files[0].clone();
+    let cancellation = Cancellation::new();
+    let context = default_context(&cancellation);
+    let limits = IrLimits::default();
+    let records = rdf_partition_records_claimed(metadata, &file, text, 5);
+    let partition = UnpublishedRdfPartition::admit(
+        metadata,
+        file.id,
+        file.content_hash,
+        file.byte_length,
+        records,
+        &limits,
+        &context,
+    )
+    .unwrap();
+    let estimate = RdfPartitionStage::storage_estimate(&partition).unwrap();
+    assert!(estimate.admit(estimate.required_bytes() - 1).is_err());
+    let reservation = estimate.admit(estimate.required_bytes()).unwrap();
+    let directory = TempDir::new().unwrap();
+    // No verified parent exists while the original owned payload is consumed.
+    let stage =
+        RdfPartitionStage::write_in(directory.path(), partition, reservation, &context).unwrap();
+    let path = directory.path().join(format!("rdf-{}.sqlite3", file.id));
+    assert!(fs::metadata(&path).unwrap().len() <= reservation.final_bytes());
+    let database = Connection::open(&path).unwrap();
+    assert_eq!(
+        database
+            .query_row("SELECT count(*) FROM partition_descriptor", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        database
+            .query_row("SELECT count(*) FROM rdf_statements", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        5
+    );
+    drop(database);
+    let parent = IdentityVerifiedGeneration::verify(
+        metadata,
+        document,
+        &limits,
+        &ExtensionSupport::default(),
+        &context,
+    )
+    .unwrap();
+    assert_eq!(parent.document().files.len(), 2);
+    let expected = VerifiedRdfPartition::verify(
+        &parent,
+        file.id,
+        rdf_partition_records_claimed(metadata, &file, text, 5),
+        &limits,
+        &context,
+    )
+    .unwrap();
+    let descriptor = expected.descriptor().clone();
+    let expected = expected.records().to_vec();
+    // Even an independently authenticated descriptor cannot read an unfinished stage.
+    assert!(RdfPartitionReader::open_in(directory.path(), &descriptor, &limits, &context).is_err());
+    let reader = stage.authenticate(&parent, &limits, &context).unwrap();
+    assert_eq!(reader.descriptor(), &descriptor);
+    drop(reader);
+    drop(parent);
+    let reader =
+        RdfPartitionReader::open_in(directory.path(), &descriptor, &limits, &context).unwrap();
+    let mut observed = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = reader
+            .extensions(cursor, GenerationReadLimit::new(2).unwrap(), &context)
+            .unwrap();
+        assert_eq!(page.total_available(), 5);
+        let next = page.next_cursor();
+        observed.extend(page.into_items());
+        if next.is_none() {
+            break;
+        }
+        cursor = next;
+    }
+    assert_eq!(observed, expected);
+    for record in observed {
+        let statement = rootlight_ir::decode_rdf_statement_envelope(&record).unwrap();
+        statement.verify_source_text(text).unwrap();
+        assert_eq!(statement.object().literal_value(), Some("café"));
+        assert!(statement.source().line_hint().is_some());
+    }
+}
+
+#[test]
+fn unpublished_rdf_stage_rejects_identity_quota_and_unreserved_writes() {
+    use crate::RdfPartitionStage;
+    use rootlight_storage::{PublicationSpaceEstimate, RdfPartitionError, UnpublishedRdfPartition};
+    let text = "_:a <urn:p> \"value\" .";
+    let (metadata, document) = rdf_partition_parent_document(2, text, 2, b"unpublished-admission");
+    let file = &document.files[0];
+    let cancellation = Cancellation::new();
+    let context = default_context(&cancellation);
+    let limits = IrLimits::default();
+    let records = rdf_partition_records_claimed(metadata, file, text, 2);
+    let mut forged = records.clone();
+    forged[0].id = FactId::from_bytes([255; 20]);
+    assert!(matches!(
+        UnpublishedRdfPartition::admit(
+            metadata,
+            file.id,
+            file.content_hash,
+            file.byte_length,
+            forged,
+            &limits,
+            &context
+        ),
+        Err(RdfPartitionError::InvalidRecord)
+    ));
+    let other = &document.files[1];
+    assert!(matches!(
+        UnpublishedRdfPartition::admit(
+            metadata,
+            other.id,
+            other.content_hash,
+            other.byte_length,
+            records.clone(),
+            &limits,
+            &context
+        ),
+        Err(RdfPartitionError::InvalidRecord)
+    ));
+    let bytes = records.iter().map(|record| record.payload.len()).sum();
+    let mut exact = limits.clone();
+    exact.max_total_extension_bytes = bytes;
+    UnpublishedRdfPartition::admit(
+        metadata,
+        file.id,
+        file.content_hash,
+        file.byte_length,
+        records.clone(),
+        &exact,
+        &context,
+    )
+    .unwrap();
+    exact.max_total_extension_bytes -= 1;
+    assert!(matches!(
+        UnpublishedRdfPartition::admit(
+            metadata,
+            file.id,
+            file.content_hash,
+            file.byte_length,
+            records.clone(),
+            &exact,
+            &context
+        ),
+        Err(RdfPartitionError::Quota(_))
+    ));
+    let partition = UnpublishedRdfPartition::admit(
+        metadata,
+        file.id,
+        file.content_hash,
+        file.byte_length,
+        records.clone(),
+        &limits,
+        &context,
+    )
+    .unwrap();
+    let directory = TempDir::new().unwrap();
+    let insufficient = PublicationSpaceEstimate::new(1, 0, 0)
+        .unwrap()
+        .admit(1)
+        .unwrap();
+    assert!(
+        RdfPartitionStage::write_in(directory.path(), partition, insufficient, &context).is_err()
+    );
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+    for (resource, rows, sources, text) in [
+        (GenerationResource::Rows, 1, 2, 100_000),
+        (GenerationResource::SourceReferences, 2, 1, 100_000),
+        (GenerationResource::TextBytes, 2, 2, 1),
+    ] {
+        let partition = UnpublishedRdfPartition::admit(
+            metadata,
+            file.id,
+            file.content_hash,
+            file.byte_length,
+            records.clone(),
+            &limits,
+            &context,
+        )
+        .unwrap();
+        let estimate = RdfPartitionStage::storage_estimate(&partition).unwrap();
+        let reservation = estimate.admit(estimate.required_bytes()).unwrap();
+        let constrained = GenerationContext::new(
+            &cancellation,
+            GenerationBudget::new(rows, sources, text).unwrap(),
+        );
+        let error =
+            RdfPartitionStage::write_in(directory.path(), partition, reservation, &constrained)
+                .unwrap_err();
+        assert!(
+            matches!(error.kind(), CatalogErrorKind::BudgetExceeded { resource: actual, .. } if actual == resource)
+        );
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+    cancellation.cancel(CancellationReason::ClientRequest);
+    assert!(matches!(
+        UnpublishedRdfPartition::admit(
+            metadata,
+            file.id,
+            file.content_hash,
+            file.byte_length,
+            records,
+            &limits,
+            &context
+        ),
+        Err(RdfPartitionError::Control(_))
+    ));
+}
+
+#[test]
+fn unpublished_rdf_stage_final_authentication_rejects_drift_and_cancellation() {
+    use crate::RdfPartitionStage;
+    use rootlight_storage::UnpublishedRdfPartition;
+    let text = "_:a <urn:p> \"value\" .";
+    let parent = rdf_partition_parent(2, text, 2, b"unpublished-final");
+    let foreign = rdf_partition_parent(2, text, 2, b"foreign-unpublished-final");
+    let file = &parent.document().files[0];
+    let limits = IrLimits::default();
+    for fault in [
+        "provenance",
+        "foreign_parent",
+        "payload",
+        "count",
+        "header",
+        "quota",
+        "cancel",
+    ] {
+        let cancellation = Cancellation::new();
+        let context = default_context(&cancellation);
+        let mut records = rdf_partition_records(&parent, file.id, text, 2);
+        if fault == "provenance" {
+            let statement = rootlight_ir::decode_rdf_statement_envelope(&records[0]).unwrap();
+            records[0] =
+                rootlight_ir::new_rdf_statement_envelope(FactId::from_bytes([254; 20]), &statement)
+                    .unwrap();
+        }
+        let partition = UnpublishedRdfPartition::admit(
+            parent.metadata(),
+            file.id,
+            file.content_hash,
+            file.byte_length,
+            records,
+            &limits,
+            &context,
+        )
+        .unwrap();
+        let reservation = RdfPartitionStage::storage_estimate(&partition)
+            .unwrap()
+            .admit(u64::MAX)
+            .unwrap();
+        let directory = TempDir::new().unwrap();
+        let stage = RdfPartitionStage::write_in(directory.path(), partition, reservation, &context)
+            .unwrap();
+        let path = directory.path().join(format!("rdf-{}.sqlite3", file.id));
+        let database = Connection::open(&path).unwrap();
+        match fault {
+            "payload" => {
+                database
+                    .execute("UPDATE rdf_statements SET payload = payload || ' '", [])
+                    .unwrap();
+            }
+            "count" => {
+                database.execute("DELETE FROM rdf_statements WHERE record_id = (SELECT min(record_id) FROM rdf_statements)", []).unwrap();
+            }
+            "header" => {
+                database
+                    .execute(
+                        "INSERT INTO partition_descriptor(singleton, header) VALUES(1, X'00')",
+                        [],
+                    )
+                    .unwrap();
+            }
+            _ => {}
+        }
+        drop(database);
+        let mut read_limits = limits.clone();
+        if fault == "quota" {
+            read_limits.max_total_extension_bytes = 1;
+        }
+        if fault == "cancel" {
+            cancellation.cancel(CancellationReason::ClientRequest);
+        }
+        let selected_parent = if fault == "foreign_parent" {
+            &foreign
+        } else {
+            &parent
+        };
+        let error = stage
+            .authenticate(selected_parent, &read_limits, &context)
+            .unwrap_err();
+        if fault == "cancel" {
+            assert_eq!(error.kind(), CatalogErrorKind::Cancelled);
+        }
+        let database = Connection::open(&path).unwrap();
+        let headers: i64 = database
+            .query_row("SELECT count(*) FROM partition_descriptor", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(headers, i64::from(fault == "header"), "{fault}");
+    }
 }
 
 #[test]
@@ -827,9 +1166,9 @@ fn rdf_partition_pages_enforce_exact_source_and_metadata_text_budgets() {
 
 #[test]
 fn rdf_partitions_cold_read_beyond_the_production_owned_payload_limit() {
-    use crate::{RdfPartitionReader, RdfPartitionWriter};
+    use crate::{RdfPartitionReader, RdfPartitionStage, RdfPartitionWriter};
     use rootlight_ir::IrDocumentUsage;
-    use rootlight_storage::VerifiedRdfPartition;
+    use rootlight_storage::{UnpublishedRdfPartition, VerifiedRdfPartition};
     let text = format!("_:a <urn:p> \"{}\" .", "x".repeat(256 * 1024));
     let count = 260;
     let limits = IrLimits::default();
@@ -839,9 +1178,9 @@ fn rdf_partitions_cold_read_beyond_the_production_owned_payload_limit() {
     let directory = TempDir::new().unwrap();
     let mut descriptors = Vec::new();
     let mut summaries = Vec::new();
-    for file in &parent.document().files {
-        // Only one large admitted payload is owned at a time; sealing drops it
-        // before authenticating the persisted rows or building the next file.
+    for (index, file) in parent.document().files.iter().enumerate() {
+        // Each path releases its owned payload before cold validation or the
+        // next file. The unpublished path reloads only its admitted file.
         let records = rdf_partition_records(&parent, file.id, &text, count);
         let usage = records
             .iter()
@@ -853,21 +1192,54 @@ fn rdf_partitions_cold_read_beyond_the_production_owned_payload_limit() {
                     )
                     .unwrap()
             });
-        let partition =
-            VerifiedRdfPartition::verify(&parent, file.id, records, &limits, &context).unwrap();
-        assert!(
-            partition.descriptor().payload_bytes()
-                <= u64::try_from(limits.max_total_extension_bytes).unwrap()
-        );
-        descriptors.push(partition.descriptor().clone());
-        summaries.push(usage);
-        drop(
+        let reader = if index == 0 {
+            let partition =
+                VerifiedRdfPartition::verify(&parent, file.id, records, &limits, &context).unwrap();
             RdfPartitionWriter::create_in(directory.path(), partition.descriptor(), &context)
                 .unwrap()
                 .seal(partition, &limits, &context)
-                .unwrap(),
+                .unwrap()
+        } else {
+            let partition = UnpublishedRdfPartition::admit(
+                parent.metadata(),
+                file.id,
+                file.content_hash,
+                file.byte_length,
+                records,
+                &limits,
+                &context,
+            )
+            .unwrap();
+            let estimate = RdfPartitionStage::storage_estimate(&partition).unwrap();
+            let reservation = estimate.admit(estimate.required_bytes()).unwrap();
+            RdfPartitionStage::write_in(directory.path(), partition, reservation, &context)
+                .unwrap()
+                .authenticate(&parent, &limits, &context)
+                .unwrap()
+        };
+        assert!(
+            reader.descriptor().payload_bytes()
+                <= u64::try_from(limits.max_total_extension_bytes).unwrap()
         );
+        descriptors.push(reader.descriptor().clone());
+        summaries.push(usage);
+        drop(reader);
     }
+    assert_eq!(
+        descriptors
+            .iter()
+            .map(|descriptor| descriptor.payload_bytes())
+            .sum::<u64>(),
+        273_410_152
+    );
+    assert_eq!(
+        descriptors
+            .iter()
+            .map(|descriptor| descriptor.record_count())
+            .sum::<u64>(),
+        520
+    );
+    assert_eq!(limits.max_total_extension_bytes, 268_435_456);
     assert!(
         descriptors
             .iter()

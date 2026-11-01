@@ -10,18 +10,284 @@ use std::{
     sync::Mutex,
 };
 
-use rootlight_ids::{ContentHash, FactId};
+use rootlight_ids::{ContentHash, FactId, FileId};
 use rootlight_ir::{
     ExtensionCriticality, ExtensionEnvelope, FactEvidence, FactRef, IrDocumentUsage, IrLimits,
     RDF_STATEMENT_NAMESPACE, SourceRef, decode_rdf_statement_envelope,
 };
 use rootlight_storage::{
-    GenerationContext, GenerationControlError, GenerationReadLimit, GenerationResource,
-    RDF_PARTITION_FORMAT_VERSION, RdfPartitionDescriptor, ReadPage, VerifiedRdfPartition,
+    DiskReservation, GenerationContext, GenerationControlError, GenerationMetadata,
+    GenerationReadLimit, GenerationResource, IdentityVerifiedGeneration, PublicationSpaceEstimate,
+    RDF_PARTITION_FORMAT_VERSION, RdfPartitionDescriptor, RdfPartitionError, ReadPage,
+    UnpublishedRdfPartition, VerifiedRdfPartition,
 };
 use rusqlite::{Connection, Row, params};
 
 use crate::{CatalogError, CatalogErrorKind, codec, schema, sqlite_database_path};
+
+/// Private, non-queryable RDF awaiting authentication against the final parent.
+///
+/// Its file has no trusted descriptor row. The caller owns staging cleanup and
+/// publication; this handle grants neither a verified descriptor nor a reader.
+#[derive(Debug)]
+pub struct RdfPartitionStage {
+    path: PathBuf,
+    metadata: GenerationMetadata,
+    file: FileId,
+    source_hash: ContentHash,
+    source_bytes: u64,
+    record_count: u64,
+    payload_bytes: u64,
+    content_hash: ContentHash,
+    database_upper_bytes: u64,
+}
+
+impl RdfPartitionStage {
+    /// Estimates database plus rollback-journal space before any file is written.
+    ///
+    /// The caller must admit and reserve this estimate before [`Self::write_in`].
+    /// This method performs no allocation of disk space or publication.
+    ///
+    /// # Errors
+    /// Rejects checked-size overflow or an estimate above lifecycle ceilings.
+    pub fn storage_estimate(
+        partition: &UnpublishedRdfPartition,
+    ) -> Result<PublicationSpaceEstimate, CatalogError> {
+        let database = partition_database_upper(
+            u64::try_from(partition.payload_bytes()).map_err(|_| corrupt())?,
+            u64::try_from(partition.records().len()).map_err(|_| corrupt())?,
+        )?;
+        let temporary = database
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(1024 * 1024))
+            .ok_or_else(corrupt)?;
+        PublicationSpaceEstimate::new(database, temporary, 0)
+            .map_err(|_| CatalogError::new(CatalogErrorKind::InvalidGeneration))
+    }
+
+    /// Consumes and releases one admitted file into reserved private staging.
+    ///
+    /// No verified descriptor, reader, or publication authority is returned.
+    /// The reservation must cover both database and temporary journal bounds.
+    ///
+    /// # Errors
+    /// Rejects insufficient pre-write reservation, existing/insecure targets,
+    /// transaction failure, checked-size overflow, or interruption.
+    pub fn write_in(
+        directory: &Path,
+        partition: UnpublishedRdfPartition,
+        reservation: DiskReservation,
+        context: &GenerationContext<'_>,
+    ) -> Result<Self, CatalogError> {
+        partition
+            .require_context(context)
+            .map_err(partition_admission_error)?;
+        let payload_bytes = u64::try_from(partition.payload_bytes()).map_err(|_| corrupt())?;
+        let record_count = u64::try_from(partition.records().len()).map_err(|_| corrupt())?;
+        let database_upper_bytes = partition_database_upper(payload_bytes, record_count)?;
+        let temporary = database_upper_bytes
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(1024 * 1024))
+            .ok_or_else(corrupt)?;
+        if reservation.final_bytes() < database_upper_bytes
+            || reservation.temporary_bytes() < temporary
+        {
+            return Err(CatalogError::new(CatalogErrorKind::InvalidGeneration));
+        }
+        let path = partition_file_path(directory, partition.file())?;
+        let stage = Self {
+            path,
+            metadata: partition.metadata(),
+            file: partition.file(),
+            source_hash: partition.source_hash(),
+            source_bytes: partition.source_bytes(),
+            record_count,
+            payload_bytes,
+            content_hash: partition.content_hash(),
+            database_upper_bytes,
+        };
+        let mut connection = schema::create_rdf_partition(&stage.path)?;
+        schema::install_generation_cancellation(&connection, context)?;
+        limit_partition_database(&connection, database_upper_bytes)?;
+        let transaction = connection.transaction().map_err(CatalogError::sqlite)?;
+        write_partition_records(&transaction, partition.records(), context)?;
+        context.check().map_err(CatalogError::control)?;
+        transaction.commit().map_err(CatalogError::sqlite)?;
+        drop(partition);
+        drop(connection);
+        Ok(stage)
+    }
+
+    /// Authenticates one bounded staged file and installs its v1 trusted descriptor.
+    ///
+    /// At most this file is materialized. The complete parent is never fabricated
+    /// or reconstructed from a fragment, and input vectors from writing are gone.
+    ///
+    /// # Errors
+    /// Rejects changed staged content, existing descriptors, foreign parent/file
+    /// ownership, unknown provenance, unchanged quotas, or typed control failures.
+    pub fn authenticate(
+        self,
+        parent: &IdentityVerifiedGeneration,
+        limits: &IrLimits,
+        context: &GenerationContext<'_>,
+    ) -> Result<RdfPartitionReader, CatalogError> {
+        context.check().map_err(CatalogError::control)?;
+        let mut connection = schema::open_rdf_partition_staging_writer(&self.path, context)?;
+        limit_partition_database(&connection, self.database_upper_bytes)?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(CatalogError::sqlite)?;
+        schema::validate_rdf_partition_size(&transaction, self.database_upper_bytes, context)?;
+        let headers: i64 = transaction
+            .query_row("SELECT count(*) FROM partition_descriptor", [], |row| {
+                row.get(0)
+            })
+            .map_err(CatalogError::sqlite)?;
+        let count: i64 = transaction
+            .query_row("SELECT count(*) FROM rdf_statements", [], |row| row.get(0))
+            .map_err(CatalogError::sqlite)?;
+        if headers != 0 || codec::nonnegative_u64(count)? != self.record_count {
+            return Err(corrupt());
+        }
+        let mut statement = transaction.prepare("SELECT record_id, provenance_id, source, payload FROM rdf_statements ORDER BY record_id").map_err(CatalogError::sqlite)?;
+        let mut rows = statement.query([]).map_err(CatalogError::sqlite)?;
+        let mut records = Vec::new();
+        let mut usage = IrDocumentUsage::default();
+        while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
+            context.check().map_err(CatalogError::control)?;
+            let record = decode_record(
+                row,
+                self.metadata,
+                self.file,
+                self.source_hash,
+                self.source_bytes,
+                limits,
+            )?;
+            usage = usage
+                .checked_add(
+                    IrDocumentUsage::measure_extension(&record, limits).map_err(|_| corrupt())?,
+                    limits,
+                )
+                .map_err(|_| corrupt())?;
+            let count = u64::try_from(usage.extensions()).map_err(|_| corrupt())?;
+            context
+                .require(GenerationResource::Rows, count)
+                .map_err(CatalogError::control)?;
+            context
+                .require(GenerationResource::SourceReferences, count)
+                .map_err(CatalogError::control)?;
+            let text = usage
+                .total_string_bytes()
+                .checked_add(usage.total_extension_bytes())
+                .and_then(|bytes| u64::try_from(bytes).ok())
+                .ok_or_else(corrupt)?;
+            context
+                .require(GenerationResource::TextBytes, text)
+                .map_err(CatalogError::control)?;
+            records
+                .try_reserve(1)
+                .map_err(|_| CatalogError::new(CatalogErrorKind::Storage))?;
+            records.push(record);
+        }
+        drop(rows);
+        drop(statement);
+        let admitted = UnpublishedRdfPartition::admit(
+            self.metadata,
+            self.file,
+            self.source_hash,
+            self.source_bytes,
+            records,
+            limits,
+            context,
+        )
+        .map_err(partition_admission_error)?;
+        if admitted.content_hash() != self.content_hash
+            || u64::try_from(admitted.payload_bytes()).map_err(|_| corrupt())? != self.payload_bytes
+        {
+            return Err(corrupt());
+        }
+        let verified = admitted
+            .authenticate(parent, limits, context)
+            .map_err(partition_admission_error)?;
+        let descriptor = verified.descriptor().clone();
+        transaction
+            .execute(
+                "INSERT INTO partition_descriptor(singleton, header) VALUES (1, ?1)",
+                [descriptor_header(&descriptor)?],
+            )
+            .map_err(CatalogError::sqlite)?;
+        context.check().map_err(CatalogError::control)?;
+        transaction.commit().map_err(CatalogError::sqlite)?;
+        drop(verified);
+        drop(connection);
+        RdfPartitionReader::open_path(&self.path, &descriptor, limits, context)
+    }
+}
+
+fn partition_admission_error(error: RdfPartitionError) -> CatalogError {
+    match error {
+        RdfPartitionError::Control(error) => CatalogError::control(error),
+        _ => CatalogError::new(CatalogErrorKind::InvalidGeneration),
+    }
+}
+
+fn partition_database_upper(payload_bytes: u64, record_count: u64) -> Result<u64, CatalogError> {
+    payload_bytes
+        .checked_mul(2)
+        .and_then(|bytes| {
+            record_count
+                .checked_mul(4096)
+                .and_then(|rows| bytes.checked_add(rows))
+        })
+        .and_then(|bytes| bytes.checked_add(4 * 1024 * 1024))
+        .ok_or_else(corrupt)
+}
+
+fn limit_partition_database(
+    connection: &Connection,
+    maximum_bytes: u64,
+) -> Result<(), CatalogError> {
+    let page_bytes: i64 = connection
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .map_err(CatalogError::sqlite)?;
+    let page_bytes = codec::nonnegative_u64(page_bytes)?;
+    let pages = maximum_bytes.checked_div(page_bytes).ok_or_else(corrupt)?;
+    let observed: i64 = connection
+        .pragma_update_and_check(None, "max_page_count", codec::sqlite_i64(pages)?, |row| {
+            row.get(0)
+        })
+        .map_err(CatalogError::sqlite)?;
+    if codec::nonnegative_u64(observed)? != pages {
+        return Err(corrupt());
+    }
+    Ok(())
+}
+
+fn write_partition_records(
+    connection: &Connection,
+    records: &[ExtensionEnvelope],
+    context: &GenerationContext<'_>,
+) -> Result<(), CatalogError> {
+    let mut insert = connection.prepare("INSERT INTO rdf_statements(record_id, provenance_id, source, payload) VALUES (?1, ?2, ?3, ?4)").map_err(CatalogError::sqlite)?;
+    for record in records {
+        context.check().map_err(CatalogError::control)?;
+        let source = record
+            .evidence
+            .source
+            .as_ref()
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))?;
+        insert
+            .execute(params![
+                record.id.as_bytes().as_slice(),
+                record.provenance.as_bytes().as_slice(),
+                serde_json::to_vec(source).map_err(CatalogError::json)?,
+                &record.payload
+            ])
+            .map_err(CatalogError::sqlite)?;
+    }
+    Ok(())
+}
 
 /// Single-use writer for a private, caller-owned RDF partition staging file.
 ///
@@ -223,7 +489,14 @@ impl RdfPartitionReader {
         let mut usage = IrDocumentUsage::default();
         while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
             context.check().map_err(CatalogError::control)?;
-            let record = decode_record(row, expected, limits)?;
+            let record = decode_record(
+                row,
+                expected.metadata(),
+                expected.file(),
+                expected.source_hash(),
+                expected.source_bytes(),
+                limits,
+            )?;
             if previous.is_some_and(|id| id >= record.id) {
                 return Err(corrupt());
             }
@@ -303,7 +576,14 @@ impl RdfPartitionReader {
         let mut usage = IrDocumentUsage::default();
         while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
             context.check().map_err(CatalogError::control)?;
-            let record = decode_record(row, &self.descriptor, &self.limits)?;
+            let record = decode_record(
+                row,
+                self.descriptor.metadata(),
+                self.descriptor.file(),
+                self.descriptor.source_hash(),
+                self.descriptor.source_bytes(),
+                &self.limits,
+            )?;
             if after.is_some_and(|id| record.id <= id) {
                 return Err(corrupt());
             }
@@ -351,7 +631,11 @@ fn partition_path(
     directory: &Path,
     descriptor: &RdfPartitionDescriptor,
 ) -> Result<PathBuf, CatalogError> {
-    sqlite_database_path(directory, &format!("rdf-{}.sqlite3", descriptor.file()))
+    partition_file_path(directory, descriptor.file())
+}
+
+fn partition_file_path(directory: &Path, file: FileId) -> Result<PathBuf, CatalogError> {
+    sqlite_database_path(directory, &format!("rdf-{file}.sqlite3"))
 }
 
 fn descriptor_header(descriptor: &RdfPartitionDescriptor) -> Result<Vec<u8>, CatalogError> {
@@ -380,7 +664,10 @@ fn descriptor_header(descriptor: &RdfPartitionDescriptor) -> Result<Vec<u8>, Cat
 
 fn decode_record(
     row: &Row<'_>,
-    descriptor: &RdfPartitionDescriptor,
+    metadata: GenerationMetadata,
+    file: FileId,
+    source_hash: ContentHash,
+    source_bytes: u64,
     limits: &IrLimits,
 ) -> Result<ExtensionEnvelope, CatalogError> {
     let id = codec::fact_id(row.get(0).map_err(CatalogError::sqlite)?)?;
@@ -391,11 +678,11 @@ fn decode_record(
         return Err(corrupt());
     }
     let source: SourceRef = serde_json::from_slice(encoded_source).map_err(CatalogError::json)?;
-    if source.repository() != descriptor.metadata().repository()
-        || source.generation() != descriptor.metadata().generation()
-        || source.span().file() != descriptor.file()
-        || source.content_hash() != descriptor.source_hash()
-        || source.span().end_byte() > descriptor.source_bytes()
+    if source.repository() != metadata.repository()
+        || source.generation() != metadata.generation()
+        || source.span().file() != file
+        || source.content_hash() != source_hash
+        || source.span().end_byte() > source_bytes
         || serde_json::to_vec(&source).map_err(CatalogError::json)? != encoded_source
     {
         return Err(corrupt());
@@ -407,8 +694,8 @@ fn decode_record(
     }
     let record = ExtensionEnvelope {
         id,
-        repository: descriptor.metadata().repository(),
-        generation: descriptor.metadata().generation(),
+        repository: metadata.repository(),
+        generation: metadata.generation(),
         namespace: RDF_STATEMENT_NAMESPACE.into(),
         version: "1".into(),
         criticality: ExtensionCriticality::Noncritical,
@@ -416,7 +703,7 @@ fn decode_record(
         provenance,
         evidence: FactEvidence {
             source: Some(source),
-            derivation: vec![FactRef::File(descriptor.file())],
+            derivation: vec![FactRef::File(file)],
         },
     };
     decode_rdf_statement_envelope(&record).map_err(|_| corrupt())?;

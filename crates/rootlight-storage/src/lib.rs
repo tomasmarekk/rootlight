@@ -43,7 +43,8 @@ pub use publication::{
     classify_recovery, verify_publication,
 };
 pub use rdf_partition::{
-    RDF_PARTITION_FORMAT_VERSION, RdfPartitionDescriptor, RdfPartitionError, VerifiedRdfPartition,
+    RDF_PARTITION_FORMAT_VERSION, RdfPartitionDescriptor, RdfPartitionError,
+    UnpublishedRdfPartition, VerifiedRdfPartition,
 };
 pub use reader::{
     CoverageReadRequest, GenerationReadLimit, GenerationReadLimitError, GenerationReader,

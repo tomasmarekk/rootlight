@@ -92,38 +92,41 @@ pub struct VerifiedRdfPartition {
     records: Vec<ExtensionEnvelope>,
 }
 
-impl VerifiedRdfPartition {
-    /// Admits one file's RDF records without materializing the combined generation.
+/// Locally canonical RDF awaiting authentication against a complete parent.
+///
+/// This type grants no verified descriptor, reader, or publication authority.
+/// It owns at most one file's unchanged, quota-admitted RDF payload.
+#[derive(Debug, PartialEq, Eq)]
+pub struct UnpublishedRdfPartition {
+    metadata: GenerationMetadata,
+    file: FileId,
+    source_hash: ContentHash,
+    source_bytes: u64,
+    records: Vec<ExtensionEnvelope>,
+    usage: IrDocumentUsage,
+    content_hash: ContentHash,
+    encoded_bytes: u64,
+}
+
+impl UnpublishedRdfPartition {
+    /// Admits canonical records against a claimed immutable file before parent verification.
     ///
-    /// Source bytes must already have been bound by the producer to the parent's
-    /// immutable source frame. Typed decoding authenticates canonical records;
-    /// it does not independently acquire or reparse that source frame.
+    /// Claims remain untrusted until [`Self::authenticate`] succeeds. The producer
+    /// binds source bytes to its captured source frame; no source is acquired here.
     ///
     /// # Errors
-    /// Rejects missing/overlapping parent ownership, unknown provenance, malformed
-    /// or duplicate identities, unchanged IR quota violations, or interruption.
-    pub fn verify(
-        parent: &IdentityVerifiedGeneration,
+    /// Rejects malformed/duplicate identities, foreign claimed source ownership,
+    /// unchanged IR quota violations, or interruption. Provenance is checked later.
+    pub fn admit(
+        metadata: GenerationMetadata,
         file: FileId,
+        source_hash: ContentHash,
+        source_bytes: u64,
         mut records: Vec<ExtensionEnvelope>,
         limits: &IrLimits,
         context: &GenerationContext<'_>,
     ) -> Result<Self, RdfPartitionError> {
         context.check()?;
-        let anchor = parent
-            .snapshot()
-            .find_file(file)
-            .ok_or(RdfPartitionError::MissingFile)?;
-        if parent.document().extensions.iter().any(|record| {
-            record.namespace == RDF_STATEMENT_NAMESPACE
-                && record
-                    .evidence
-                    .source
-                    .as_ref()
-                    .is_some_and(|source| source.span().file() == file)
-        }) {
-            return Err(RdfPartitionError::OverlappingFile);
-        }
         let mut usage = IrDocumentUsage::default();
         for record in &records {
             context.check()?;
@@ -132,36 +135,18 @@ impl VerifiedRdfPartition {
             let statement = decode_rdf_statement_envelope(record)
                 .map_err(|_| RdfPartitionError::InvalidRecord)?;
             let source = statement.source();
-            if record.repository != parent.metadata().repository()
-                || record.generation != parent.metadata().generation()
+            if record.repository != metadata.repository()
+                || record.generation != metadata.generation()
                 || source.span().file() != file
-                || source.content_hash() != anchor.content_hash
-                || source.span().end_byte() > anchor.byte_length
+                || source.content_hash() != source_hash
+                || source.span().end_byte() > source_bytes
             {
                 return Err(RdfPartitionError::InvalidRecord);
-            }
-            if parent
-                .document()
-                .provenance
-                .binary_search_by_key(&record.provenance, |p| p.id)
-                .is_err()
-            {
-                return Err(RdfPartitionError::UnknownProvenance);
-            }
-            if parent
-                .document()
-                .extensions
-                .binary_search_by_key(&record.id, |e| e.id)
-                .is_ok()
-            {
-                return Err(RdfPartitionError::DuplicateIdentity);
             }
         }
         let count = u64::try_from(records.len()).map_err(|_| RdfPartitionError::Encoding)?;
         context.require(GenerationResource::Rows, count)?;
         context.require(GenerationResource::SourceReferences, count)?;
-        let payload_bytes = u64::try_from(usage.total_extension_bytes())
-            .map_err(|_| RdfPartitionError::Encoding)?;
         let text_bytes = usage
             .total_string_bytes()
             .checked_add(usage.total_extension_bytes())
@@ -184,20 +169,179 @@ impl VerifiedRdfPartition {
                 .map_or(RdfPartitionError::Encoding, RdfPartitionError::Control));
         }
         context.check()?;
+        Ok(Self {
+            metadata,
+            file,
+            source_hash,
+            source_bytes,
+            records,
+            usage,
+            content_hash: ContentHash::from_bytes(*writer.hasher.finalize().as_bytes()),
+            encoded_bytes: writer.bytes,
+        })
+    }
+
+    /// Requires the retained census to fit this operation's current resource budget.
+    ///
+    /// # Errors
+    /// Returns typed cancellation or row, source-reference, text, or encoded-text
+    /// budget failures before an admitted payload is handed to another operation.
+    pub fn require_context(
+        &self,
+        context: &GenerationContext<'_>,
+    ) -> Result<(), RdfPartitionError> {
+        context.check()?;
+        let count = u64::try_from(self.records.len()).map_err(|_| RdfPartitionError::Encoding)?;
+        context.require(GenerationResource::Rows, count)?;
+        context.require(GenerationResource::SourceReferences, count)?;
+        let text_bytes = self
+            .usage
+            .total_string_bytes()
+            .checked_add(self.usage.total_extension_bytes())
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or(RdfPartitionError::Encoding)?;
+        context.require(GenerationResource::TextBytes, text_bytes)?;
+        context.require(GenerationResource::EncodedTextBytes, self.encoded_bytes)?;
+        Ok(())
+    }
+
+    /// Authenticates the locally admitted file against the final complete parent.
+    ///
+    /// # Errors
+    /// Rejects parent/file/hash drift, inline overlap, unknown provenance, duplicate
+    /// parent identities, stricter quota violations, or interruption.
+    pub fn authenticate(
+        self,
+        parent: &IdentityVerifiedGeneration,
+        limits: &IrLimits,
+        context: &GenerationContext<'_>,
+    ) -> Result<VerifiedRdfPartition, RdfPartitionError> {
+        context.check()?;
+        let anchor = parent
+            .snapshot()
+            .find_file(self.file)
+            .ok_or(RdfPartitionError::MissingFile)?;
+        if parent.metadata() != self.metadata
+            || anchor.content_hash != self.source_hash
+            || anchor.byte_length != self.source_bytes
+        {
+            return Err(RdfPartitionError::InvalidRecord);
+        }
+        if parent.document().extensions.iter().any(|record| {
+            record.namespace == RDF_STATEMENT_NAMESPACE
+                && record
+                    .evidence
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.span().file() == self.file)
+        }) {
+            return Err(RdfPartitionError::OverlappingFile);
+        }
+        self.usage
+            .clone()
+            .checked_add(IrDocumentUsage::default(), limits)?;
+        let count = u64::try_from(self.records.len()).map_err(|_| RdfPartitionError::Encoding)?;
+        self.require_context(context)?;
+        for record in &self.records {
+            context.check()?;
+            if parent
+                .document()
+                .provenance
+                .binary_search_by_key(&record.provenance, |p| p.id)
+                .is_err()
+            {
+                return Err(RdfPartitionError::UnknownProvenance);
+            }
+            if parent
+                .document()
+                .extensions
+                .binary_search_by_key(&record.id, |e| e.id)
+                .is_ok()
+            {
+                return Err(RdfPartitionError::DuplicateIdentity);
+            }
+        }
         let descriptor = RdfPartitionDescriptor {
             format_version: RDF_PARTITION_FORMAT_VERSION,
-            metadata: parent.metadata(),
-            file,
-            source_hash: anchor.content_hash,
-            source_bytes: anchor.byte_length,
+            metadata: self.metadata,
+            file: self.file,
+            source_hash: self.source_hash,
+            source_bytes: self.source_bytes,
             record_count: count,
-            payload_bytes,
-            content_hash: ContentHash::from_bytes(*writer.hasher.finalize().as_bytes()),
+            payload_bytes: u64::try_from(self.usage.total_extension_bytes())
+                .map_err(|_| RdfPartitionError::Encoding)?,
+            content_hash: self.content_hash,
         };
-        Ok(Self {
+        Ok(VerifiedRdfPartition {
             descriptor,
-            records,
+            records: self.records,
         })
+    }
+
+    /// Returns the unverified claimed parent metadata.
+    #[must_use]
+    pub const fn metadata(&self) -> GenerationMetadata {
+        self.metadata
+    }
+    /// Returns the unverified claimed file identity.
+    #[must_use]
+    pub const fn file(&self) -> FileId {
+        self.file
+    }
+    /// Returns the locally checked claimed source hash.
+    #[must_use]
+    pub const fn source_hash(&self) -> ContentHash {
+        self.source_hash
+    }
+    /// Returns the locally checked claimed source byte length.
+    #[must_use]
+    pub const fn source_bytes(&self) -> u64 {
+        self.source_bytes
+    }
+    /// Returns canonical records without granting a verified capability.
+    #[must_use]
+    pub fn records(&self) -> &[ExtensionEnvelope] {
+        &self.records
+    }
+    /// Returns canonical payload bytes admitted under the unchanged quotas.
+    #[must_use]
+    pub fn payload_bytes(&self) -> usize {
+        self.usage.total_extension_bytes()
+    }
+    /// Returns the local content commitment, which is not parent authentication.
+    #[must_use]
+    pub const fn content_hash(&self) -> ContentHash {
+        self.content_hash
+    }
+}
+
+impl VerifiedRdfPartition {
+    /// Admits and authenticates one file without materializing the combined generation.
+    ///
+    /// # Errors
+    /// Rejects invalid records, missing/overlapping ownership, unknown provenance,
+    /// duplicate identities, unchanged quota violations, or interruption.
+    pub fn verify(
+        parent: &IdentityVerifiedGeneration,
+        file: FileId,
+        records: Vec<ExtensionEnvelope>,
+        limits: &IrLimits,
+        context: &GenerationContext<'_>,
+    ) -> Result<Self, RdfPartitionError> {
+        let anchor = parent
+            .snapshot()
+            .find_file(file)
+            .ok_or(RdfPartitionError::MissingFile)?;
+        UnpublishedRdfPartition::admit(
+            parent.metadata(),
+            file,
+            anchor.content_hash,
+            anchor.byte_length,
+            records,
+            limits,
+            context,
+        )?
+        .authenticate(parent, limits, context)
     }
 
     /// Returns the trusted content commitment for durable storage and cold reopen.
