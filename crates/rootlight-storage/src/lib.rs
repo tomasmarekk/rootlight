@@ -9,6 +9,7 @@ mod generation;
 mod lifecycle;
 mod migration;
 mod publication;
+mod rdf_partition;
 mod reader;
 mod sharing;
 mod source_catalog;
@@ -40,6 +41,9 @@ pub use publication::{
     PublicationCorruption, PublicationError, PublicationExpectation, PublicationLimits,
     PublicationManifest, PublicationMarker, PublicationStage, RecoveryState, VerifiedPublication,
     classify_recovery, verify_publication,
+};
+pub use rdf_partition::{
+    RDF_PARTITION_FORMAT_VERSION, RdfPartitionDescriptor, RdfPartitionError, VerifiedRdfPartition,
 };
 pub use reader::{
     CoverageReadRequest, GenerationReadLimit, GenerationReadLimitError, GenerationReader,

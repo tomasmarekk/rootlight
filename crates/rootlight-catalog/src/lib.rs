@@ -9,10 +9,12 @@
 mod codec;
 mod indexed_read;
 mod layout_census;
+mod rdf_partition;
 mod read;
 mod schema;
 mod write;
 pub use layout_census::{OracleLayoutCensus, OracleLayoutFragment, OracleLayoutPreview};
+pub use rdf_partition::{RdfPartitionReader, RdfPartitionWriter};
 
 #[cfg(test)]
 extern crate self as rootlight_catalog;

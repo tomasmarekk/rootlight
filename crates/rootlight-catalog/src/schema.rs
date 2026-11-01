@@ -31,6 +31,8 @@ const CONTROL_APPLICATION_ID: u32 = 0x524c_4354;
 const ORACLE_APPLICATION_ID: u32 = 0x524c_4f52;
 const CONTROL_SCHEMA_VERSION: u32 = 2;
 const ORACLE_SCHEMA_VERSION: u32 = 9;
+const RDF_PARTITION_APPLICATION_ID: u32 = 0x524c_5250;
+const RDF_PARTITION_SCHEMA_VERSION: u32 = 1;
 const ORACLE_SCHEMA_OVERHEAD_BYTES: u64 = 4 * 1024 * 1024;
 const ORACLE_FIXED_BYTES_PER_ROW: u64 = 2 * 1024;
 const ORACLE_TEXT_REPLICATION_FACTOR: u64 = 3;
@@ -43,6 +45,24 @@ const MIGRATIONS_SQL: &str = "CREATE TABLE migrations (
     migration_id INTEGER PRIMARY KEY NOT NULL,
     checksum BLOB NOT NULL CHECK(length(checksum) = 32)
 ) STRICT";
+
+const RDF_PARTITION_DESCRIPTOR_SQL: &str = "CREATE TABLE partition_descriptor (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton = 1),
+    header BLOB NOT NULL CHECK(length(header) BETWEEN 1 AND 4096)
+) STRICT";
+const RDF_PARTITION_STATEMENTS_SQL: &str = "CREATE TABLE rdf_statements (
+    record_id BLOB PRIMARY KEY NOT NULL CHECK(length(record_id) = 20),
+    provenance_id BLOB NOT NULL CHECK(length(provenance_id) = 20),
+    source BLOB NOT NULL CHECK(length(source) BETWEEN 1 AND 4096),
+    payload TEXT NOT NULL CHECK(length(CAST(payload AS BLOB)) BETWEEN 1 AND 1048576)
+) STRICT";
+
+const RDF_PARTITION_TABLES: [NamedSql; 4] = [
+    NamedSql::table("application_meta", APPLICATION_META_SQL),
+    NamedSql::table("migrations", MIGRATIONS_SQL),
+    NamedSql::table("partition_descriptor", RDF_PARTITION_DESCRIPTOR_SQL),
+    NamedSql::table("rdf_statements", RDF_PARTITION_STATEMENTS_SQL),
+];
 
 const GENERATION_META_SQL: &str = "CREATE TABLE generation_meta (
     singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton = 1),
@@ -778,6 +798,15 @@ pub(crate) fn open_control(path: &Path) -> Result<Connection, CatalogError> {
 }
 
 pub(crate) fn create_oracle(path: &Path) -> Result<Connection, CatalogError> {
+    let connection = create_private_writer(path)?;
+    let definition = oracle_definition();
+    initialize(&connection, &definition)?;
+    validate(&connection, &definition)?;
+    install_authorizer(&connection)?;
+    Ok(connection)
+}
+
+fn create_private_writer(path: &Path) -> Result<Connection, CatalogError> {
     require_private_file_boundary()?;
     create_private_file(path, true)?;
     let flags =
@@ -786,7 +815,12 @@ pub(crate) fn create_oracle(path: &Path) -> Result<Connection, CatalogError> {
     configure_limits(&connection)?;
     verify_sqlite(&connection)?;
     configure_writer(&connection, JournalMode::Delete)?;
-    let definition = oracle_definition();
+    Ok(connection)
+}
+
+pub(crate) fn create_rdf_partition(path: &Path) -> Result<Connection, CatalogError> {
+    let connection = create_private_writer(path)?;
+    let definition = rdf_partition_definition();
     initialize(&connection, &definition)?;
     validate(&connection, &definition)?;
     install_authorizer(&connection)?;
@@ -818,6 +852,16 @@ pub(crate) fn open_oracle_reader(
     path: &Path,
     context: &GenerationContext<'_>,
 ) -> Result<Connection, CatalogError> {
+    let connection = open_private_reader(path, context)?;
+    validate_schema(&connection, &oracle_reader_definition(&connection)?)?;
+    install_authorizer(&connection)?;
+    Ok(connection)
+}
+
+fn open_private_reader(
+    path: &Path,
+    context: &GenerationContext<'_>,
+) -> Result<Connection, CatalogError> {
     require_private_file_boundary()?;
     validate_private_file(path)?;
     let flags =
@@ -838,8 +882,28 @@ pub(crate) fn open_oracle_reader(
     install_generation_cancellation(&connection, context)?;
     verify_sqlite(&connection)?;
     configure_reader(&connection)?;
-    validate_schema(&connection, &oracle_reader_definition(&connection)?)?;
+    Ok(connection)
+}
+
+pub(crate) fn open_rdf_partition_reader(
+    path: &Path,
+    maximum_bytes: u64,
+    context: &GenerationContext<'_>,
+) -> Result<Connection, CatalogError> {
+    let connection = open_private_reader(path, context)?;
+    // Census, authentication, and later pages must observe one immutable view.
+    connection
+        .execute_batch("BEGIN")
+        .map_err(CatalogError::sqlite)?;
+    let physical_bytes = pragma_nonnegative_u64(&connection, "page_count")?
+        .checked_mul(pragma_nonnegative_u64(&connection, "page_size")?)
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
+    if physical_bytes > maximum_bytes {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
+    }
+    validate_schema(&connection, &rdf_partition_definition())?;
     install_authorizer(&connection)?;
+    validate_integrity(&connection, Some(context))?;
     Ok(connection)
 }
 
@@ -927,6 +991,16 @@ fn oracle_definition() -> SchemaDefinition<'static> {
         version: ORACLE_SCHEMA_VERSION,
         objects: &OBJECTS,
         ..oracle_v8_definition()
+    }
+}
+
+fn rdf_partition_definition() -> SchemaDefinition<'static> {
+    SchemaDefinition {
+        application_id: RDF_PARTITION_APPLICATION_ID,
+        version: RDF_PARTITION_SCHEMA_VERSION,
+        kind: b"rootlight-rdf-partition",
+        allows_document_hash: false,
+        objects: &RDF_PARTITION_TABLES,
     }
 }
 
