@@ -104,6 +104,7 @@ mod n3;
 mod nim;
 mod nix;
 mod nquads;
+mod nquads_dgraph;
 mod ntriples;
 mod nushell;
 mod objective_c;
@@ -483,7 +484,10 @@ impl QueryPack {
         let mut identity_query = Query::new(&language, source).map_err(|_| family)?;
         let mut optional_query = Query::new(&language, source).map_err(|_| family)?;
         let mut expected = EXPECTED_CAPTURES.to_vec();
-        if matches!(family, GrammarFamily::NTriples | GrammarFamily::NQuads) {
+        if matches!(
+            family,
+            GrammarFamily::NTriples | GrammarFamily::NQuads | GrammarFamily::NQuadsDgraph
+        ) {
             expected = vec!["comment", "expression", "module", "root", "string"];
         }
         if family == GrammarFamily::Sparql {
@@ -902,7 +906,7 @@ impl QueryPack {
                 .any(|(quantifier, role)| {
                     *quantifier != CaptureQuantifier::Zero
                         && (role.belongs_to_identity_closure()
-                            || (matches!(family, GrammarFamily::CMake | GrammarFamily::NTriples | GrammarFamily::NQuads)
+                            || (matches!(family, GrammarFamily::CMake | GrammarFamily::NTriples | GrammarFamily::NQuads | GrammarFamily::NQuadsDgraph)
                                 && *role == StructuralRole::Expression)
                             // Source-certified references remain mandatory even when
                             // their native pattern has no declaration capture.
@@ -1144,8 +1148,12 @@ impl QueryPack {
                         && (candidate.role == StructuralRole::Expression
                             || (candidate.role == StructuralRole::Reference
                                 && candidate.syntax == "cmake.normal_variable")))
-                    || (matches!(family, GrammarFamily::NTriples | GrammarFamily::NQuads)
-                        && candidate.required
+                    || (matches!(
+                        family,
+                        GrammarFamily::NTriples
+                            | GrammarFamily::NQuads
+                            | GrammarFamily::NQuadsDgraph
+                    ) && candidate.required
                         && candidate.role == StructuralRole::Expression)
                     || (family == GrammarFamily::Nix
                         && candidate.required
@@ -3261,7 +3269,18 @@ impl QueryPack {
                     }
                     continue;
                 }
-                let candidate = if input.family == GrammarFamily::NQuads {
+                let candidate = if input.family == GrammarFamily::NQuadsDgraph {
+                    let Some(candidate) = nquads_dgraph::candidate(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.cancellation,
+                    )?
+                    else {
+                        continue;
+                    };
+                    Ok(candidate)
+                } else if input.family == GrammarFamily::NQuads {
                     let Some(candidate) =
                         nquads::candidate(capture.node, role, input.source, input.cancellation)?
                     else {
@@ -4804,6 +4823,9 @@ fn candidate_for_capture(
             GrammarFamily::N3 => return Err(query_failure("query-n3-unproven-call")),
             GrammarFamily::NTriples => return Err(query_failure("query-ntriples-unproven-call")),
             GrammarFamily::NQuads => return Err(query_failure("query-nquads-unproven-call")),
+            GrammarFamily::NQuadsDgraph => {
+                return Err(query_failure("query-nquads-dgraph-unproven-call"));
+            }
             GrammarFamily::Trig => return Err(query_failure("query-trig-unproven-call")),
             GrammarFamily::Turtle => return Err(query_failure("query-turtle-unproven-call")),
             GrammarFamily::TypeSpec => return Err(query_failure("query-typespec-unproven-call")),
@@ -5332,6 +5354,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
         (GrammarFamily::N3, "n3_doc") => Some("n3.file"),
         (GrammarFamily::NTriples, "document") => Some("ntriples.file"),
         (GrammarFamily::NQuads, "document") => Some("nquads.file"),
+        (GrammarFamily::NQuadsDgraph, "document") => Some("nquads-dgraph.file"),
         (GrammarFamily::Trig, "document") => Some("trig.file"),
         (GrammarFamily::Turtle, "document") => Some("turtle.file"),
         (GrammarFamily::Idris, "idris") => Some("idris.file"),
@@ -6038,6 +6061,10 @@ impl QueryPackRegistry {
                 include_str!("../queries/ntriples.scm"),
             ),
             (GrammarFamily::NQuads, include_str!("../queries/nquads.scm")),
+            (
+                GrammarFamily::NQuadsDgraph,
+                include_str!("../queries/nquads-dgraph.scm"),
+            ),
             (GrammarFamily::Trig, include_str!("../queries/trig.scm")),
             (GrammarFamily::Turtle, include_str!("../queries/turtle.scm")),
             (GrammarFamily::Ron, include_str!("../queries/ron.scm")),
@@ -6421,12 +6448,13 @@ mod tests {
     #[test]
     fn reviewed_packs_compile_with_the_exact_closed_capture_contract() {
         let registry = QueryPackRegistry::audited().expect("reviewed packs compile");
-        assert_eq!(registry.len(), 116);
+        assert_eq!(registry.len(), 117);
         assert_eq!(registry.initialized_count(), registry.len());
 
         for family in [
             GrammarFamily::NTriples,
             GrammarFamily::NQuads,
+            GrammarFamily::NQuadsDgraph,
             GrammarFamily::Sparql,
             GrammarFamily::N3,
             GrammarFamily::Trig,
@@ -6539,7 +6567,10 @@ mod tests {
             let mut names = pack.identity_query.capture_names().to_vec();
             names.sort_unstable();
             let mut expected = EXPECTED_CAPTURES.to_vec();
-            if matches!(family, GrammarFamily::NTriples | GrammarFamily::NQuads) {
+            if matches!(
+                family,
+                GrammarFamily::NTriples | GrammarFamily::NQuads | GrammarFamily::NQuadsDgraph
+            ) {
                 expected = vec!["comment", "expression", "module", "root", "string"];
             }
             if family == GrammarFamily::Sparql {

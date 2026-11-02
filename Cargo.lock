@@ -1719,6 +1719,7 @@ dependencies = [
  "rootlight-ir",
  "rootlight-thinkscript",
  "rootlight-tree-sitter-nquads",
+ "rootlight-tree-sitter-nquads-dgraph",
  "rootlight-tree-sitter-ntriples",
  "rootlight-unicode",
  "rootlight-vba",
@@ -2429,6 +2430,14 @@ dependencies = [
 
 [[package]]
 name = "rootlight-tree-sitter-nquads"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "rootlight-tree-sitter-nquads-dgraph"
 version = "0.1.0"
 dependencies = [
  "cc",

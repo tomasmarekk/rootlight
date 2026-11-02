@@ -17,6 +17,8 @@ pub enum GrammarFamily {
     NTriples,
     /// Native standard N-Quads roles; dataset evaluation remains separate.
     NQuads,
+    /// Native Dgraph physical identifiers/default values without database UID resolution.
+    NQuadsDgraph,
     /// SPARQL written requests without query evaluation or external resource loading.
     Sparql,
     /// Notation3 written source without logical inference or external IRI loading.
@@ -337,10 +339,11 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(114);
+        let mut descriptors = Vec::with_capacity(115);
         for family in [
             GrammarFamily::NTriples,
             GrammarFamily::NQuads,
+            GrammarFamily::NQuadsDgraph,
             GrammarFamily::Sparql,
             GrammarFamily::N3,
             GrammarFamily::Trig,
@@ -556,6 +559,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
     match family {
         GrammarFamily::NTriples => rootlight_tree_sitter_ntriples::LANGUAGE.into(),
         GrammarFamily::NQuads => rootlight_tree_sitter_nquads::LANGUAGE.into(),
+        GrammarFamily::NQuadsDgraph => rootlight_tree_sitter_nquads_dgraph::LANGUAGE.into(),
         GrammarFamily::Sparql => tree_sitter_sparql::LANGUAGE.into(),
         GrammarFamily::N3 => tree_sitter_n3::LANGUAGE.into(),
         GrammarFamily::Trig | GrammarFamily::Turtle => tree_sitter_turtle::LANGUAGE.into(),
@@ -778,6 +782,15 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             parser_sha256: "ac05831209cb07be7cf3e21c349f3a585b5502cc978de4c0458fb2cbde37da87",
             scanner_sha256: Some(
                 "c19fbdb075f255928cb105291e1fe1ad9bee896bd2c0d0d9c634ab7914a349cb",
+            ),
+        },
+        GrammarFamily::NQuadsDgraph => GrammarIdentity {
+            language_id: "nquads-dgraph",
+            grammar_version: "0.1.0",
+            source_package_sha256: "e995cacf76c5045138fdfb948e62796772c8a149d9fa09b3500944cb5561c758",
+            parser_sha256: "e39ff6358d3f7c74835e0fd778071ec715f8740e08819a99f98cc8d0655b5dfe",
+            scanner_sha256: Some(
+                "9c771ecb90f23e6c1a164df4a1e2570f61d181658f947b380bd3ed1fd67ddda7",
             ),
         },
         GrammarFamily::Sparql => GrammarIdentity {
@@ -1675,10 +1688,11 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 114);
+        assert_eq!(registry.descriptors().len(), 115);
         for family in [
             GrammarFamily::NTriples,
             GrammarFamily::NQuads,
+            GrammarFamily::NQuadsDgraph,
             GrammarFamily::Sparql,
             GrammarFamily::N3,
             GrammarFamily::Trig,
@@ -2057,6 +2071,11 @@ mod tests {
                 "nquads",
                 "rootlight-tree-sitter-nquads",
             ),
+            (
+                GrammarFamily::NQuadsDgraph,
+                "nquads-dgraph",
+                "rootlight-tree-sitter-nquads-dgraph",
+            ),
             (GrammarFamily::Sparql, "sparql", "tree-sitter-sparql"),
             (GrammarFamily::N3, "n3", "tree-sitter-n3"),
             (GrammarFamily::Trig, "trig", "tree-sitter-turtle"),
@@ -2230,7 +2249,10 @@ mod tests {
             } else {
                 // Both registry-derived overrides and unpublished bindings
                 // require xtask to verify every checked-in source byte.
-                if matches!(family, GrammarFamily::NTriples | GrammarFamily::NQuads) {
+                if matches!(
+                    family,
+                    GrammarFamily::NTriples | GrammarFamily::NQuads | GrammarFamily::NQuadsDgraph
+                ) {
                     assert_eq!(
                         quoted_field(grammar, "manifest_path"),
                         format!("native-grammars/{language}/Cargo.toml")
@@ -2251,6 +2273,7 @@ mod tests {
                             family,
                             GrammarFamily::NTriples
                                 | GrammarFamily::NQuads
+                                | GrammarFamily::NQuadsDgraph
                                 | GrammarFamily::Sparql
                                 | GrammarFamily::N3
                                 | GrammarFamily::Trig
