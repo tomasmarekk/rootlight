@@ -8,8 +8,9 @@ use rootlight_adapter_sdk::{AdapterError, SinkError, SyntaxFact, SyntaxFactKind}
 use rootlight_cancel::Cancellation;
 use rootlight_ids::SymbolId;
 use rootlight_ir::{
-    ContainerRef, EntityKind, OccurrenceRecord, OccurrenceRole, OccurrenceTarget, SourceRef,
-    SourceSpan,
+    ContainerRef, EntityKind, FactRef, OccurrenceRecord, OccurrenceRole, OccurrenceTarget,
+    RelationEndpoint, RelationPredicate, RelationRecord, SourceRef, SourceSpan,
+    derive_relation_record_id,
 };
 
 use super::MaterializedEntity;
@@ -29,7 +30,48 @@ fn same_source(left: &SourceRef, right: &SourceRef) -> bool {
 /// Unknown/recovered native output is excluded by the caller on both paths.
 pub(super) fn certified_reference(fact: &SyntaxFact) -> bool {
     fact.kind() == SyntaxFactKind::Occurrence
-        && fact.syntax_kind().as_str() == "c.formal_value.reference"
+        && matches!(
+            fact.syntax_kind().as_str(),
+            "c.formal_value.reference" | "c.formal_return.reference"
+        )
+}
+
+/// Add the written owner dependency only after the exact native formal join.
+/// The occurrence-based RefersTo remains separate from this function-owned Read.
+pub(super) fn read_relation(
+    read: &OccurrenceRecord,
+    target: SymbolId,
+    cancel: &Cancellation,
+) -> Result<Option<RelationRecord>, AdapterError> {
+    cancel.check()?;
+    let Some(owner) = read.enclosing else {
+        return Ok(None);
+    };
+    if read.syntax_kind != "c.formal_return.reference"
+        || read.role != OccurrenceRole::Read
+        || read.target != (OccurrenceTarget::Resolved { symbol: target })
+    {
+        return Ok(None);
+    }
+    let mut relation = super::lexical_reference_relation(read, target)?;
+    relation.subject = RelationEndpoint::Entity(owner);
+    relation.predicate = RelationPredicate::Reads;
+    relation
+        .evidence
+        .derivation
+        .try_reserve_exact(3)
+        .map_err(|_| SinkError::AllocationFailed)?;
+    relation.evidence.derivation.extend([
+        FactRef::Entity(owner),
+        FactRef::Fact(read.id),
+        FactRef::Entity(target),
+    ]);
+    relation.evidence.derivation.sort_unstable();
+    relation.evidence.derivation.dedup();
+    relation.id = derive_relation_record_id(&relation)
+        .map_err(|_| super::provider_failure("c-formal-return-relation-identity"))?;
+    cancel.check()?;
+    Ok(Some(relation))
 }
 
 impl<'a> ParameterTargets<'a> {
@@ -213,8 +255,13 @@ impl<'a> ParameterTargets<'a> {
             return Ok(None);
         };
         if !certified_reference(fact)
-            || occurrence.syntax_kind != "c.formal_value.reference"
-            || occurrence.role != OccurrenceRole::Reference
+            || occurrence.syntax_kind != fact.syntax_kind().as_str()
+            || occurrence.role
+                != if fact.syntax_kind().as_str() == "c.formal_return.reference" {
+                    OccurrenceRole::Read
+                } else {
+                    OccurrenceRole::Reference
+                }
             || !matches!(occurrence.target, OccurrenceTarget::Unresolved { .. })
             || occurrence.enclosing != Some(owner.record.id)
             || owner.record.language != "c"

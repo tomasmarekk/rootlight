@@ -1217,7 +1217,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/378";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/379";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/162";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/16";
@@ -27496,6 +27496,7 @@ mod tests {
     mod apex_calls;
     mod astro_discovery;
     mod bash_bindings;
+    mod c_formal_returns;
     mod c_preprocessor;
     mod cmake;
     mod cmake_patch;

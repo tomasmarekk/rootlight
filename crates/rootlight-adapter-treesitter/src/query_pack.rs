@@ -1314,7 +1314,10 @@ impl QueryPack {
                         && candidate.role == StructuralRole::Reference
                         && matches!(
                             candidate.syntax,
-                            "c.formal_value" | "c.written_variable" | "c.local_address"
+                            "c.formal_value"
+                                | "c.formal_return"
+                                | "c.written_variable"
+                                | "c.local_address"
                         ))
                     || (family == GrammarFamily::Hare
                         && candidate.required

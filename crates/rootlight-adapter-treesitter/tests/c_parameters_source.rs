@@ -676,8 +676,230 @@ fn shadowed_directive_recovered_and_unsupported_bodies_keep_explicit_binding_gap
         );
         assert!(output.document().skipped_regions.iter().any(|gap|
             gap.domain == rootlight_ir::FactDomain::Relations
-            && (gap.detail == "c-formal-proof-is-limited-to-direct-arguments-in-a-single-clean-call-statement"
+            && (gap.detail == "c-formal-proof-is-limited-to-single-call-arguments-or-bare-returns-before-local-binders"
                 || gap.detail == "c-native-written-formal-binding-unavailable")), "{source}");
+    }
+}
+
+#[test]
+fn original_early_return_reads_only_its_exact_written_formal() {
+    let raw = include_bytes!("fixtures/c_parameters/sieve.c");
+    assert_eq!(raw.len(), 508);
+    assert_eq!(&raw[89..90], b"n");
+    let text = std::str::from_utf8(raw).unwrap();
+    let output = analyze(text);
+    let owner_start = text.find("sieve(int").unwrap();
+    let owner = entity_at(&output, "sieve", EntityKind::Function, owner_start, 5);
+    let formal_start = text.find("int n").unwrap() + 4;
+    let formal = entity_at(&output, "n", EntityKind::Parameter, formal_start, 1);
+    let reads: Vec<_> = output
+        .document()
+        .occurrences
+        .iter()
+        .filter(|site| {
+            site.role == OccurrenceRole::Read
+                && site.source.span().start_byte() == 89
+                && site.source.span().end_byte() == 90
+        })
+        .collect();
+    assert_eq!(reads.len(), 1);
+    let read = reads[0];
+    assert_eq!(read.syntax_kind, "c.formal_return.reference");
+    assert_eq!(read.target, OccurrenceTarget::Resolved { symbol: formal });
+    assert_eq!(read.enclosing, Some(owner));
+    assert_eq!(read.source.content_hash(), content_hash(raw));
+    assert_eq!(read.syntactic_text_hash, content_hash(b"n"));
+    assert_eq!(read.evidence.source.as_ref(), Some(&read.source));
+    assert_eq!(
+        output
+            .document()
+            .relations
+            .iter()
+            .filter(|edge| {
+                edge.predicate == RelationPredicate::RefersTo
+                    && edge.subject == RelationEndpoint::Occurrence(read.id)
+                    && edge.object == RelationEndpoint::Entity(formal)
+                    && edge.evidence.source.as_ref() == Some(&read.source)
+            })
+            .count(),
+        1
+    );
+    let dependencies: Vec<_> = output
+        .document()
+        .relations
+        .iter()
+        .filter(|edge| {
+            edge.predicate == RelationPredicate::Reads
+                && edge.subject == RelationEndpoint::Entity(owner)
+                && edge.object == RelationEndpoint::Entity(formal)
+                && edge.evidence.source.as_ref() == Some(&read.source)
+        })
+        .collect();
+    assert_eq!(dependencies.len(), 1);
+    assert_eq!(dependencies[0].provenance, read.provenance);
+    assert_eq!(dependencies[0].evidence.derivation.len(), 3);
+    let (_, required) = execute(raw, "utf-8", 4096).unwrap();
+    let (bounded, _) = execute(raw, "utf-8", required).unwrap();
+    let bounded_reads: Vec<_> = bounded
+        .document()
+        .occurrences
+        .iter()
+        .filter(|site| site.role == OccurrenceRole::Read && site.source.span().start_byte() == 89)
+        .collect();
+    assert_eq!(bounded_reads, reads);
+    assert!(
+        bounded
+            .document()
+            .relations
+            .iter()
+            .any(|edge| **dependencies.first().unwrap() == *edge)
+    );
+    assert_eq!(
+        bounded
+            .document()
+            .relations
+            .iter()
+            .filter(|edge| {
+                edge.predicate == RelationPredicate::RefersTo
+                    && edge.subject == RelationEndpoint::Occurrence(read.id)
+                    && edge.object == RelationEndpoint::Entity(formal)
+                    && edge.evidence.source.as_ref() == Some(&read.source)
+            })
+            .count(),
+        1
+    );
+    assert!(matches!(
+        execute(raw, "utf-8", required - 1),
+        Err(AdapterError::Sink(SinkError::StreamLimit {
+            resource: ResourceKind::RequiredSyntaxFacts,
+            ..
+        }))
+    ));
+}
+
+#[test]
+fn bare_return_dependencies_reserve_exact_relation_and_derivation_capacity() {
+    let source = "int owned(int value) { return value; }";
+    for relations in [true, false] {
+        let selected = |maximum| {
+            let mut ir = IrLimits::default();
+            if relations {
+                ir.max_relations = maximum;
+            } else {
+                ir.max_total_records = maximum;
+            }
+            ir
+        };
+        let Err(AdapterError::Sink(SinkError::StreamLimit {
+            resource: ResourceKind::Records,
+            observed,
+            limit: 1,
+        })) = execute_controlled(
+            source.as_bytes(),
+            "utf-8",
+            4096,
+            selected(1),
+            &Cancellation::new(),
+        )
+        else {
+            panic!("native Reads must participate in relation preflight");
+        };
+        let output = execute_controlled(
+            source.as_bytes(),
+            "utf-8",
+            4096,
+            selected(observed),
+            &Cancellation::new(),
+        )
+        .unwrap()
+        .0;
+        assert_eq!(
+            output
+                .document()
+                .relations
+                .iter()
+                .filter(|edge| edge.predicate == RelationPredicate::Reads)
+                .count(),
+            1
+        );
+        assert!(matches!(
+            execute_controlled(
+                source.as_bytes(),
+                "utf-8",
+                4096,
+                selected(observed - 1),
+                &Cancellation::new()
+            ),
+            Err(AdapterError::Sink(SinkError::StreamLimit {
+                resource: ResourceKind::Records,
+                ..
+            }))
+        ));
+    }
+    let mut ir = IrLimits::default();
+    ir.max_nested_items_per_record = 2;
+    assert!(matches!(
+        execute_controlled(source.as_bytes(), "utf-8", 4096, ir, &Cancellation::new()),
+        Err(AdapterError::Sink(SinkError::StreamLimit {
+            resource: ResourceKind::NestedItems,
+            observed: 3,
+            limit: 2
+        }))
+    ));
+}
+
+#[test]
+fn bare_formal_returns_keep_scope_prefix_and_expression_fences() {
+    for source in [
+        "int owned(int value) { /* early */ if (value) { return value; } return 0; }",
+        "int owned(int value) { { if (value) return value; } return 0; }",
+    ] {
+        let output = analyze(source);
+        let used = source.rfind("value").unwrap() as u64;
+        let formal = output
+            .document()
+            .entities
+            .iter()
+            .find(|entity| entity.kind == EntityKind::Parameter && entity.canonical_name == "value")
+            .unwrap();
+        assert!(
+            output.document().occurrences.iter().any(|site| {
+                site.role == OccurrenceRole::Read
+                    && site.source.span().start_byte() == used
+                    && site.target == OccurrenceTarget::Resolved { symbol: formal.id }
+            }),
+            "{source}"
+        );
+    }
+    for source in [
+        "int owned(int value) { if (value) return 0; else return value; }",
+        "int owned(int value) { if (value) return 0; else if (1) return value; }",
+        "int owned(int value) { return ({ return value; }); }",
+        "int owned(int value) { int other; return value; }",
+        "int owned(int value) { external(); return value; }",
+        "int owned(int value) { if (1) {} return value; }",
+        "int owned(int value) { { int value = 1; return value; } }",
+        "int owned(int value) { if (1) { int value = 1; return value; } }",
+        "int owned(int value) { while (1) { return value; } }",
+        "int owned(int value) { switch (1) { case 1: return value; } }",
+        "int owned(int value) { return (value); }",
+        "int owned(int value) { return value + 1; }",
+        "int owned(int value) { return external(value); }",
+        "int owned(int value) { return sizeof(value); }",
+        "int owned(int value, int value) { return value; }",
+        "int owned(int value[2]) { return value; }",
+        "#define value other\nint owned(int value) { return value; }",
+        "int owned(int value) { return value; }\n#define AFTER 1\n",
+        "int owned(int value) { return value;",
+    ] {
+        let output = analyze(source);
+        assert!(
+            !output.document().occurrences.iter().any(|site| {
+                site.syntax_kind == "c.formal_return.reference"
+                    && matches!(site.target, OccurrenceTarget::Resolved { .. })
+            }),
+            "{source}"
+        );
     }
 }
 

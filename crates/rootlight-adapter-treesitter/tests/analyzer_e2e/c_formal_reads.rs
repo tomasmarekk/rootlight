@@ -4,6 +4,81 @@
 use super::*;
 
 #[test]
+fn original_bare_return_artifact_rebinds_and_rejects_changed_source() {
+    let case = *CASES.iter().find(|case| case.name == "c").unwrap();
+    let raw = include_bytes!("../fixtures/c_parameters/sieve.c");
+    let native = Arc::new(provider());
+    let primary = analyzer(&native, case);
+    let fixture = Fixture::new(case, raw);
+    let bounds = limits();
+    let input = request(&fixture.snapshot, &fixture.source, case, &bounds);
+    let (original, artifact) = primary
+        .analyze_and_capture(
+            &input,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(
+        original
+            .document()
+            .occurrences
+            .iter()
+            .filter(|site| site.role == OccurrenceRole::Read
+                && site.source.span().start_byte() == 89
+                && matches!(site.target, OccurrenceTarget::Resolved { .. }))
+            .count(),
+        1
+    );
+    let successor = fixture.next_generation();
+    let current = request(&successor.snapshot, &successor.source, case, &bounds);
+    let rebound = primary
+        .analyze_from_artifact(
+            &current,
+            &artifact,
+            ExtensionSupport::default(),
+            MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+            &deadline(),
+        )
+        .unwrap();
+    let clean = analyze(&primary, &current, &ExtensionSupport::default());
+    assert_eq!(rebound.document(), clean.document());
+    assert_eq!(
+        artifact.required_syntax_fact_count(&deadline()).unwrap(),
+        native
+            .required_syntax_fact_count(&current.to_parse_request(), &deadline())
+            .unwrap()
+    );
+    let changed = fixture.rewrite(
+        &std::str::from_utf8(raw)
+            .unwrap()
+            .replace("return n;", "return 0;")
+            .into_bytes(),
+    );
+    let changed_request = request(&changed.snapshot, &changed.source, case, &bounds);
+    assert!(
+        primary
+            .analyze_from_artifact(
+                &changed_request,
+                &artifact,
+                ExtensionSupport::default(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+                &deadline()
+            )
+            .is_err()
+    );
+    let fresh = analyze(&primary, &changed_request, &ExtensionSupport::default());
+    assert!(
+        !fresh
+            .document()
+            .occurrences
+            .iter()
+            .any(|site| site.syntax_kind == "c.formal_return.reference")
+    );
+}
+
+#[test]
 fn original_formal_certificate_rebinds_but_stale_foreign_and_cancelled_artifacts_refuse() {
     let case = *CASES.iter().find(|case| case.name == "c").unwrap();
     let raw = include_bytes!("../fixtures/c_parameters/callbacks.c");

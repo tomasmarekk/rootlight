@@ -633,7 +633,9 @@ impl<'source> CaptureCache<'source> {
             return Ok(Some(false));
         }
         if role == StructuralRole::Reference
-            && node.parent().is_none_or(|p| p.kind() != "argument_list")
+            && node
+                .parent()
+                .is_none_or(|p| !matches!(p.kind(), "argument_list" | "return_statement"))
         {
             candidate.syntax = "c.unproven_variable";
             return Ok(Some(true));

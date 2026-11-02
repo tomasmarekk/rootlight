@@ -1770,6 +1770,20 @@ fn preflight_lowering_limits(
                     limits,
                 )?;
             }
+            if request.language().as_str() == "c"
+                && request.included_ranges().is_empty()
+                && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                && fact.kind() == SyntaxFactKind::Occurrence
+                && fact.syntax_kind().as_str() == "c.formal_return.reference"
+            {
+                lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
+                field_relation_derivations = checked_add(field_relation_derivations, 3)?;
+                require_resource_limit(
+                    ResourceKind::NestedItems,
+                    3,
+                    limits.max_nested_items_per_record,
+                )?;
+            }
             if request.language().as_str() == "php"
                 && request.included_ranges().is_empty()
                 && parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -6041,6 +6055,11 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         .map_err(|_| provider_failure("c-formal-occurrence-identity"))?;
                     let relation = lexical_reference_relation(&occurrence, symbol)?;
                     relations.insert(relation.id, relation);
+                    if let Some(relation) =
+                        c_formal_reads::read_relation(&occurrence, symbol, cancellation)?
+                    {
+                        relations.insert(relation.id, relation);
+                    }
                 }
                 if let Some(parameters) = &java_parameters
                     && let Some(symbol) = parameters.resolve(
@@ -11768,7 +11787,7 @@ fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> 
     {
         return Some((
             FactDomain::Relations,
-            "c-formal-proof-is-limited-to-direct-arguments-in-a-single-clean-call-statement",
+            "c-formal-proof-is-limited-to-single-call-arguments-or-bare-returns-before-local-binders",
         ));
     }
     if fact.kind() == SyntaxFactKind::Signature
@@ -15082,7 +15101,9 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     if fact.kind() == SyntaxFactKind::Occurrence
         && matches!(
             fact.syntax_kind().as_str(),
-            "c.formal_value.reference" | "c.unproven_formal_value.reference"
+            "c.formal_value.reference"
+                | "c.formal_return.reference"
+                | "c.unproven_formal_value.reference"
         )
     {
         return Some("c-native-written-formal-binding-unavailable");
@@ -15513,6 +15534,11 @@ fn import_target_gap(fact: &SyntaxFact) -> &'static str {
 }
 
 fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
+    if fact.kind() == SyntaxFactKind::Occurrence
+        && fact.syntax_kind().as_str() == "c.formal_return.reference"
+    {
+        return Some(OccurrenceRole::Read);
+    }
     if fact.kind() == SyntaxFactKind::Occurrence
         && fact.syntax_kind().as_str() == "wesl.import.reference"
     {

@@ -1,4 +1,4 @@
-//! Certify written C formal arguments in one ordinary call statement.
+//! Certify written C formal arguments and bare returns before local binders.
 //! The complete native census fences directives, recovery and unsupported bodies;
 //! includes, callee binding, macro expansion and execution remain unevaluated.
 
@@ -198,6 +198,48 @@ impl<'source> CaptureCache<'source> {
         Ok(found)
     }
 
+    fn return_prefix(
+        &mut self,
+        mut child: Node<'_>,
+        function: Node<'_>,
+        cancel: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        while let Some(parent) = child.parent() {
+            if !self.visit(cancel)? {
+                return Ok(false);
+            }
+            match parent.kind() {
+                "compound_statement" => {
+                    let mut cursor = parent.walk();
+                    for sibling in parent.named_children(&mut cursor) {
+                        if !self.visit(cancel)? {
+                            return Ok(false);
+                        }
+                        if sibling == child {
+                            break;
+                        }
+                        // A prior declaration or unmodeled statement must not
+                        // donate the parameter's name to a shadowed return.
+                        if sibling.kind() != "comment" {
+                            return Ok(false);
+                        }
+                    }
+                }
+                "if_statement"
+                    if parent.child_by_field_name("consequence") == Some(child)
+                        || parent.child_by_field_name("alternative") == Some(child) => {}
+                "function_definition" => {
+                    return Ok(
+                        parent == function && parent.child_by_field_name("body") == Some(child)
+                    );
+                }
+                _ => return Ok(false),
+            }
+            child = parent;
+        }
+        Ok(false)
+    }
+
     fn inspect(
         &mut self,
         function: Node<'_>,
@@ -254,6 +296,38 @@ impl<'source> CaptureCache<'source> {
         else {
             return Ok(reads);
         };
+        let mut cursor = body.walk();
+        'returns: loop {
+            let node = cursor.node();
+            if !self.visit(cancel)? {
+                return Ok(HashSet::new());
+            }
+            if node.kind() == "return_statement"
+                && let Some(value) = self.only(node, "identifier", cancel)?
+                && let Some(name) = self.name(value, cancel)?
+                && names.contains(name)
+                && self.return_prefix(node, function, cancel)?
+            {
+                reads
+                    .try_reserve(1)
+                    .map_err(|_| SinkError::AllocationFailed)?;
+                reads.insert((value.start_byte(), value.end_byte()));
+            }
+            if cursor.goto_first_child() {
+                continue;
+            }
+            loop {
+                if cursor.node() == body {
+                    break 'returns;
+                }
+                if cursor.goto_next_sibling() {
+                    break;
+                }
+                if !cursor.goto_parent() {
+                    return Ok(HashSet::new());
+                }
+            }
+        }
         let Some(statement) = self.only(body, "expression_statement", cancel)? else {
             return Ok(reads);
         };
@@ -315,11 +389,11 @@ impl<'source> CaptureCache<'source> {
         {
             return Ok(true);
         }
-        // Only direct argument identifiers can receive this certificate. Global
-        // initializers and other names keep ordinary syntax without walking owners.
+        // Global initializers and other names keep ordinary syntax without
+        // walking owners; the proof covers only direct arguments or returns.
         if node
             .parent()
-            .is_none_or(|parent| parent.kind() != "argument_list")
+            .is_none_or(|parent| !matches!(parent.kind(), "argument_list" | "return_statement"))
         {
             return Ok(role != StructuralRole::Signature);
         }
@@ -351,17 +425,24 @@ impl<'source> CaptureCache<'source> {
             .is_some_and(|proof| proof.contains(&(node.start_byte(), node.end_byte())))
         {
             candidate.role = StructuralRole::Reference;
-            candidate.syntax = "c.formal_value";
+            candidate.syntax = if node
+                .parent()
+                .is_some_and(|parent| parent.kind() == "return_statement")
+            {
+                "c.formal_return"
+            } else {
+                "c.formal_value"
+            };
             candidate.required = true;
             return Ok(true);
         }
         if role == StructuralRole::Signature {
             return Ok(false);
         }
-        // Refused direct argument reads cannot later acquire a name-only target.
+        // Refused reads cannot later acquire a name-only target.
         if node
             .parent()
-            .is_some_and(|parent| parent.kind() == "argument_list")
+            .is_some_and(|parent| matches!(parent.kind(), "argument_list" | "return_statement"))
         {
             candidate.syntax = "c.unproven_formal_value";
         }
@@ -550,5 +631,55 @@ mod tests {
             Err(AdapterError::Cancelled { .. })
         ));
         assert!(!output.required);
+    }
+
+    #[test]
+    fn bare_returns_require_complete_unexhausted_and_uncancelled_native_work() {
+        let source = b"int owned(int value) { if (value) { return value; } return 0; }";
+        let tree = parse(source);
+        let node = argument(&tree, source);
+        for (maximum, complete) in [(4096, false), (1, true)] {
+            let mut cache = CaptureCache::new(source, maximum, complete);
+            let mut output = capture(node, StructuralRole::Signature);
+            assert!(
+                !cache
+                    .refine(
+                        node,
+                        StructuralRole::Signature,
+                        &mut output,
+                        &Cancellation::new()
+                    )
+                    .unwrap()
+            );
+            assert!(!output.required);
+            assert_eq!(cache.exhausted(), maximum == 1);
+        }
+        let mut cache = CaptureCache::new(source, 4096, true);
+        assert!(cache.census(node, &Cancellation::new()).unwrap());
+        cache.remaining = 1;
+        let mut output = capture(node, StructuralRole::Signature);
+        assert!(
+            !cache
+                .refine(
+                    node,
+                    StructuralRole::Signature,
+                    &mut output,
+                    &Cancellation::new()
+                )
+                .unwrap()
+        );
+        assert!(cache.exhausted());
+        assert!(!output.required);
+        let cancel = Cancellation::new();
+        cancel.cancel(rootlight_cancel::CancellationReason::ClientRequest);
+        assert!(matches!(
+            CaptureCache::new(source, 4096, true).refine(
+                node,
+                StructuralRole::Signature,
+                &mut output,
+                &cancel
+            ),
+            Err(AdapterError::Cancelled { .. })
+        ));
     }
 }

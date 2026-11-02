@@ -1648,6 +1648,7 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
             | "scala.ordinary_formal.reference"
             | "scala.unproven_formal.reference"
             | "c.formal_value.reference"
+            | "c.formal_return.reference"
             | "c.unproven_formal_value.reference"
             | "c.written_variable.reference"
             | "c.local_address.reference"
@@ -3582,6 +3583,7 @@ mod scala_formal_source_tests {
             "scala.ordinary_formal.reference",
             "python.module_function.reference",
             "scala.unproven_formal.reference",
+            "c.formal_return.reference",
         ] {
             let repository = RepositoryId::from_bytes([1; 16]);
             let generation = GenerationId::from_bytes([2; 20]);
@@ -3601,7 +3603,11 @@ mod scala_formal_source_tests {
                 generation,
                 file,
                 source: source.clone(),
-                role: OccurrenceRole::Reference,
+                role: if label == "c.formal_return.reference" {
+                    OccurrenceRole::Read
+                } else {
+                    OccurrenceRole::Reference
+                },
                 enclosing: None,
                 target: OccurrenceTarget::Unresolved { text_hash: hash },
                 syntactic_text_hash: hash,
