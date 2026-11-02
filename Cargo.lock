@@ -2041,6 +2041,7 @@ dependencies = [
  "rootlight-thinkscript",
  "rootlight-tree-sitter-ntriples",
  "rootlight-tree-sitter-nquads",
+ "rootlight-tree-sitter-nquads-dgraph",
  "rootlight-vfs",
  "serde",
  "serde_json",

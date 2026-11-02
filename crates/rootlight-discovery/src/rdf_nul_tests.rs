@@ -92,6 +92,96 @@ impl StreamedSourceReceiver for Receiver {
 const ORIGINAL_TURTLE: &[u8] = b"<http://a.example/s> <http://a.example/p> '\0&([]\x7f' .\n";
 const ORIGINAL_TRIG: &[u8] = b"{<http://a.example/s> <http://a.example/p> '\0&([]\x7f' .}\n<http://example/graph> {<http://a.example/s> <http://a.example/p> '\0&([]\x7f' .}\n";
 
+#[test]
+fn dgraph_native_nul_snapshot_and_stream_preserve_configured_route_authority() {
+    let temporary = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let source = b"<alice><status>\"value\0\\xFF\\v\".\r\n# c\0\n";
+    let cases: [(&str, &[u8]); 7] = [
+        ("configured.data", source),
+        ("override.nq", source),
+        ("default.nq", source),
+        ("overridden.data", source),
+        ("invalid.data", b"<alice\0><status>\"value\"."),
+        ("binary.data", b"%PDF-1.7\n# \0\n"),
+        ("foreign.bin", source),
+    ];
+    for (path, bytes) in cases {
+        std::fs::write(temporary.path().join(path), bytes).unwrap();
+    }
+    let root = RepositoryRoot::open(
+        derive_repository(b"dgraph-native-nul-routes").id(),
+        temporary.path(),
+    )
+    .unwrap();
+    let config = ConfigSnapshot::resolve(&[ConfigLayer { source: ConfigSource::User,
+        contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.paths]\n'configured.data'='nquads-dgraph'\n'override.nq'='nquads-dgraph'\n'overridden.data'='rust'\n'invalid.data'='nquads-dgraph'\n'binary.data'='nquads-dgraph'\n" }]).unwrap();
+    let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+    let limits = DiscoveryLimits::new(20, 10, 4096, 20).unwrap();
+    let cancellation = Cancellation::new();
+    let buffered = discover(&root, &config, &policy, limits, &cancellation).unwrap();
+    let streamed = discover_with_streamed_sources(
+        &root,
+        &config,
+        &policy,
+        limits,
+        StreamedDiscoveryOptions::manifest(4096, 1, &mut Receiver::default()).unwrap(),
+        &cancellation,
+    )
+    .unwrap()
+    .into_parts()
+    .0;
+    assert_eq!(buffered.inputs, streamed.inputs);
+    assert_eq!(buffered.exclusions, streamed.exclusions);
+    assert_eq!(buffered.inputs.len(), 2);
+    for input in &buffered.inputs {
+        assert!(matches!(
+            input.path.as_str(),
+            "configured.data" | "override.nq"
+        ));
+        assert_eq!(input.content_hash, content_hash(source));
+        assert_eq!(input.bytes, u64::try_from(source.len()).unwrap());
+        assert!(
+            input
+                .language_signals
+                .iter()
+                .any(|signal| signal.language == "nquads-dgraph")
+        );
+    }
+    assert_eq!(buffered.exclusions.len(), cases.len() - 2);
+    assert!(
+        buffered
+            .exclusions
+            .iter()
+            .all(|entry| entry.reason == ExclusionReason::Binary)
+    );
+    for mut receiver in [
+        Receiver {
+            stale: true,
+            grammar: None,
+        },
+        Receiver {
+            stale: false,
+            grammar: Some(NativeNulGrammar::NQuads),
+        },
+        Receiver {
+            stale: false,
+            grammar: Some(NativeNulGrammar::NTriples),
+        },
+    ] {
+        assert!(matches!(
+            discover_with_streamed_sources(
+                &root,
+                &config,
+                &policy,
+                limits,
+                StreamedDiscoveryOptions::manifest(4096, 1, &mut receiver).unwrap(),
+                &cancellation
+            ),
+            Err(DiscoveryError::IncrementalDrift)
+        ));
+    }
+}
+
 fn config() -> ConfigSnapshot {
     ConfigSnapshot::resolve(&[ConfigLayer { source: ConfigSource::User,
         contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.paths]\n'configured.data'='turtle'\n'overridden.ttl'='rust'\n" }]).unwrap()

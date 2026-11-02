@@ -95,7 +95,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.100";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.101";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3425,6 +3425,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter"],
     },
     LanguageCapability {
+        language: "nquads-dgraph",
+        suffixes: &[],
+        aliases: &[],
+        detectors: &["configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
         language: "nquads",
         suffixes: &[".nq"],
         aliases: &[],
@@ -3691,6 +3699,7 @@ fn native_nul_route(path: &RelativePath, config: &ConfigSnapshot) -> Option<Nati
     {
         Some("ntriples") => Some(NativeNulGrammar::NTriples),
         Some("nquads") => Some(NativeNulGrammar::NQuads),
+        Some("nquads-dgraph") => Some(NativeNulGrammar::NQuadsDgraph),
         Some("turtle") => Some(NativeNulGrammar::Turtle),
         Some("trig") => Some(NativeNulGrammar::Trig),
         _ => None,
@@ -10210,6 +10219,22 @@ max_source_file_bytes = 2097152
         for path in ["data.trig", "query.rq", "rules.n3.bak", "rules.n3x"] {
             assert_ne!(extension_language(path), Some("n3"));
         }
+    }
+
+    #[test]
+    fn nquads_dgraph_requires_explicit_configuration_without_extension_aliases() {
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "nquads-dgraph")
+            .unwrap();
+        assert!(capability.suffixes.is_empty());
+        assert!(capability.aliases.is_empty());
+        assert_eq!(capability.detectors, ["configuration"]);
+        assert_eq!(capability.analyzers, ["treesitter"]);
+        assert_eq!(canonical_language("nquads-dgraph"), Some("nquads-dgraph"));
+        assert_eq!(canonical_language("dgraph"), None);
+        assert_eq!(extension_language("data.nq"), Some("nquads"));
+        assert_eq!(extension_language("data.rdf"), None);
     }
 
     #[test]

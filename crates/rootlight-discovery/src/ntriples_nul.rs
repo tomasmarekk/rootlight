@@ -79,6 +79,11 @@ impl NTriplesNulProbe {
         Self::with_language(rootlight_tree_sitter_nquads::LANGUAGE.into())
     }
 
+    /// Keeps Dgraph lexical evidence separate from the legacy N-Triples proof route.
+    pub(crate) fn for_nquads_dgraph() -> Self {
+        Self::with_language(rootlight_tree_sitter_nquads_dgraph::LANGUAGE.into())
+    }
+
     fn with_language(language: tree_sitter::Language) -> Self {
         Self {
             language,

@@ -11,6 +11,7 @@ publish = false
 blake3.workspace = true
 rootlight-tree-sitter-ntriples.workspace = true
 rootlight-tree-sitter-nquads.workspace = true
+rootlight-tree-sitter-nquads-dgraph.workspace = true
 tree-sitter.workspace = true
 tree-sitter-turtle.workspace = true
 rootlight-thinkscript = { path = "../rootlight-thinkscript" }

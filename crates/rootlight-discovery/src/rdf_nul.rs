@@ -1,5 +1,5 @@
 //! Bind raw NUL admission to complete source bytes and the selected native grammar.
-//! N-Triples/N-Quads use bounded physical lines; Turtle/TriG use a bounded document.
+//! N-Triples, N-Quads and Dgraph use bounded lines; Turtle/TriG use a bounded document.
 
 use std::{cell::Cell, ops::ControlFlow};
 
@@ -18,6 +18,8 @@ pub enum NativeNulGrammar {
     NTriples,
     /// Physical-line standard N-Quads syntax.
     NQuads,
+    /// Physical-line Dgraph identifier and default-value syntax.
+    NQuadsDgraph,
     /// Complete Turtle document syntax.
     Turtle,
     /// Complete TriG document syntax, including graph blocks.
@@ -128,6 +130,10 @@ impl NativeNulProbe {
             NativeNulGrammar::NQuads => Probe::Line {
                 grammar,
                 probe: NTriplesNulProbe::for_nquads(),
+            },
+            NativeNulGrammar::NQuadsDgraph => Probe::Line {
+                grammar,
+                probe: NTriplesNulProbe::for_nquads_dgraph(),
             },
             NativeNulGrammar::Turtle | NativeNulGrammar::Trig => {
                 Probe::Document(DocumentProbe::new(grammar))
@@ -420,6 +426,63 @@ fn native_document(
 mod tests {
     use super::*;
     use rootlight_ids::content_hash;
+
+    #[test]
+    fn dgraph_line_nul_proof_is_chunk_independent_and_grammar_bound() {
+        for source in [
+            b"<alice><status>\"a\0\\xFF\\v\".\r\n# c\0\n".as_slice(),
+            "\u{feff}<0x01><status>\"λ\0😀\".\r\n".as_bytes(),
+        ] {
+            for split in 0..=source.len() {
+                let cancellation = Cancellation::new();
+                let mut probe = NativeNulProbe::new(NativeNulGrammar::NQuadsDgraph);
+                probe.push(&source[..split], &cancellation).unwrap();
+                probe.push(&source[split..], &cancellation).unwrap();
+                let proof = probe.finish(&cancellation).unwrap();
+                let bytes = u64::try_from(source.len()).unwrap();
+                assert!(proof.permits_nul(), "{source:?}");
+                assert!(!proof.was_refused());
+                assert!(proof.matches_request(
+                    NativeNulGrammar::NQuadsDgraph,
+                    content_hash(source),
+                    bytes
+                ));
+                for other in [
+                    NativeNulGrammar::NTriples,
+                    NativeNulGrammar::NQuads,
+                    NativeNulGrammar::Turtle,
+                ] {
+                    assert!(!proof.matches_request(other, content_hash(source), bytes));
+                }
+                assert!(!proof.matches_source(content_hash(b"stale"), bytes));
+            }
+        }
+    }
+
+    #[test]
+    fn dgraph_line_nul_proof_refuses_invalid_contexts_and_complete_bad_tails() {
+        for source in [
+            b"<alice\0><status>\"value\".".as_slice(),
+            b"<alice><status>\"value\0\\q\".",
+            b"<alice><status>\"value\0\" 0x01.",
+            b"<alice><follows>0x01. # \0",
+            b"<alice><status>\"value\0\".\n\xff",
+            b"<alice><status>\"value\0\". trailing",
+        ] {
+            let cancellation = Cancellation::new();
+            let mut probe = NativeNulProbe::new(NativeNulGrammar::NQuadsDgraph);
+            for chunk in source.chunks(3) {
+                probe.push(chunk, &cancellation).unwrap();
+            }
+            let proof = probe.finish(&cancellation).unwrap();
+            assert!(!proof.permits_nul(), "{source:?}");
+            assert!(proof.matches_request(
+                NativeNulGrammar::NQuadsDgraph,
+                content_hash(source),
+                u64::try_from(source.len()).unwrap()
+            ));
+        }
+    }
 
     #[test]
     fn nquads_line_nul_proof_is_complete_chunk_independent_and_grammar_bound() {
