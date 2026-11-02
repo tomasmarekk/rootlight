@@ -1,0 +1,161 @@
+{
+  "schema": "rootlight.native-grammar-source-provenance/1",
+  "authorship": "locally maintained native DQL query grammar; no upstream grammar release or archive is claimed",
+  "native_contract": {
+    "repository": "https://github.com/dgraph-io/dgraph",
+    "revision": "c587cba75f60445125459b46b4d81757a73384aa",
+    "reviewed_contract_files": [
+      {
+        "path": "dql/parser.go",
+        "bytes": 92838,
+        "sha256": "5dcf6a1d05cc71967f3b3922539f2e2e75f2c1118f8dc15d1ce291a1945faf0b"
+      },
+      {
+        "path": "dql/state.go",
+        "bytes": 16033,
+        "sha256": "1ac318d2ce338cf71cade1b1df0202eb62409b4cc992eae24691d0d6ccef4c81"
+      },
+      {
+        "path": "lex/lexer.go",
+        "bytes": 10744,
+        "sha256": "7984b4f1169ddd0029d4476d488ef1ffe4485febfcbd01e4d9e17825a04b71f9"
+      },
+      {
+        "path": "lex/iri.go",
+        "bytes": 1839,
+        "sha256": "42d5c9cdf2dc8a9772d50520b095fae173185306fc4239f7fa93e6f30013f0d4"
+      },
+      {
+        "path": "dql/dql.go",
+        "bytes": 926,
+        "sha256": "72fbdb6a7107390388e3d4ed8f2d22ae930d1f9941d54d8992c53a0ae1f5ae0a"
+      }
+    ],
+    "upstream_license": "Apache-2.0",
+    "retained_notice": "LICENSE-DGRAPH",
+    "interpretation": "Native query roots, predicates, functions, parameter/binding/alias ownership, language suffixes and boolean filters retain physical source spelling. This is neither GraphQL nor native predicate schema syntax.",
+    "decoder_boundary": "Dgraph lex.LexQuotedString supplies the escape whitelist; parser.unquoteIfQuoted delegates to Go strconv.Unquote. The stateless scanner validates scalar four-digit Unicode escapes, rejects raw LF, and preserves permitted raw CR/NUL distinctly from EOF. No Go query engine is executed or embedded.",
+    "decoder_source_review": {
+      "local_standard_library_version": "go1.26.3",
+      "upstream_declared_toolchain": "go1.27.3",
+      "upstream_toolchain_executed": false,
+      "scope": "Read-only Go standard-library source review supplements the pinned Dgraph call sites; no whole-engine behavioral equivalence is claimed."
+    }
+  },
+  "generator": {
+    "name": "tree-sitter",
+    "version": "0.26.8",
+    "executable_sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0",
+    "abi": 14,
+    "command": [
+      "tree-sitter",
+      "generate",
+      "--abi",
+      "14",
+      "--js-runtime",
+      "native",
+      "grammar.js",
+      "--output",
+      "src"
+    ],
+    "invoked_during_compilation": false
+  },
+  "preferred_inputs": [
+    {
+      "path": "grammar.js",
+      "bytes": 6681,
+      "sha256": "256251fe226a4c2dff5bc8e4ae2664bbbab9a125f49d3bdd2169a9ad7c1b2b54"
+    },
+    {
+      "path": "src/scanner.c",
+      "bytes": 2533,
+      "sha256": "e0468515bfc343765c349fe59f9447614cb3fa4edfee0856750eeda1e5ac43d1"
+    }
+  ],
+  "generated_outputs": [
+    {
+      "path": "src/grammar.json",
+      "bytes": 41413,
+      "sha256": "5cc1a65a55bb8e37234bbee24a28c9013f8f1d2b7ff343fe7203649dec2a596f"
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 22479,
+      "sha256": "febfc54ed6d50e0d3137e6ca5ea24750b94daf6c4477f2058d3c6cd51786eb3b"
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 173139,
+      "sha256": "f19eef4ed5d0d5a6fa25ea32c76791464090d0dc2d51d14419848310c38ff477"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    }
+  ],
+  "license_scope": {
+    "local_authored_code": "AGPL-3.0-only",
+    "local_license": "LICENSE",
+    "generated_tree_sitter_headers_notice": "LICENSE.tree-sitter",
+    "native_contract_and_fixture_notice": "LICENSE-DGRAPH",
+    "upstream_material_not_relicensed": true
+  },
+  "binding": {
+    "external_scanner": true,
+    "scanner_state": "none",
+    "compilation_generates_or_downloads": false,
+    "native_build_inputs": [
+      "src/parser.c",
+      "src/scanner.c",
+      "src/tree_sitter/parser.h",
+      "src/tree_sitter/alloc.h",
+      "src/tree_sitter/array.h"
+    ],
+    "leading_utf8_bom": "Tree-sitter skips the leading UTF-8 marker before lexing; physical byte spans are not rebased. Whole-source capture remains a separate producer responsibility."
+  },
+  "syntax_scope": {
+    "supported": "Named/anonymous queries, parameters, func-generator roots, variable bindings and aliases, selected predicates/count/val, nested functions, language suffixes, pagination arguments, boolean filters, normalize/cascade/ignorereflex flags, and bounded aggregation roots. Argument commas are mandatory with no trailing comma; selection/root commas may be omitted or trailing.",
+    "not_admitted": "Mutation/upsert blocks, schema inspection and declarations, fragments, shortest-path roots without a generator, math expressions, groupby/recurse/facets directives, whitespace-separated dashed names, and escaped IRI spellings. These are explicit syntax gaps, not claims of malformed upstream input.",
+    "semantic_boundary": "Syntax does not execute or validate query result types, complete function arity/type restrictions, variable definition/use closure, or query meaning."
+  },
+  "scope": "Standalone native syntax and physical field ownership only; SDK registration, IR production, discovery, service and corpus188 qualification remain separate.",
+  "original_fixtures": {
+    "license": "Apache-2.0",
+    "retained_notice": "LICENSE-DGRAPH",
+    "fixtures": [
+      {
+        "upstream_path": "dgraph/cmd/bulk/systest/suite01/query.json",
+        "retained_path": "tests/fixtures/suite01.dql",
+        "bytes": 106,
+        "sha256": "9f1699e0c12c5edf943b6c398db0608de583763b1628da963aa3ae771617b2d4",
+        "byte_exact": true
+      },
+      {
+        "upstream_path": "dgraph/cmd/bulk/systest/suite02/query.json",
+        "retained_path": "tests/fixtures/suite02.dql",
+        "bytes": 1360,
+        "sha256": "315ef2d8f95343a2eb58116d518b77c4507b314ec59b6b695983e67b9ab7f716",
+        "byte_exact": true
+      },
+      {
+        "upstream_path": "dgraph/cmd/bulk/systest/suite03/query.json",
+        "retained_path": "tests/fixtures/suite03.dql",
+        "bytes": 244,
+        "sha256": "4334b51af9b8b6fdf4e6be1521afd4fcd2a00401777915319b29c5907c25e1a0",
+        "byte_exact": true
+      }
+    ],
+    "renaming": "Only retained file extensions identify native DQL; every original source byte is unchanged."
+  }
+}

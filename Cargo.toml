@@ -51,6 +51,7 @@ members = [
     "xtask",
 ]
 exclude = [
+    "native-grammars/dql",
     "native-grammars/nquads",
     "native-grammars/nquads-dgraph",
     "native-grammars/ntriples",
