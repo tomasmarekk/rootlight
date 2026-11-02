@@ -1749,7 +1749,7 @@ fn bounded_table_count(
 
 fn validate_identity_registry(
     connection: &Connection,
-    expected: &std::collections::BTreeSet<write::RegistryIdentity>,
+    expected: &[write::RegistryIdentity],
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
     let mut statement = connection

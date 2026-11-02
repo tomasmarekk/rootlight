@@ -1203,7 +1203,7 @@ const GENERATED_HEADER_MAX_BYTES: usize = 8 * 1024;
 const GENERATED_HEADER_MAX_LINES: usize = 64;
 // Host admission policy must requalify old whole-source fallbacks even when
 // language parsers and resolver facts retain their independent revisions.
-const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/13";
+const PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.providers/14";
 const PROJECT_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.project-provider/32";
 const PARSER_PROVIDER_SET_SEED: &[u8] = b"rootlight.first-slice.parser-providers/1";
 const BUILD_CONTEXT_SEED: &[u8] = b"rootlight.first-slice.build-context/1";

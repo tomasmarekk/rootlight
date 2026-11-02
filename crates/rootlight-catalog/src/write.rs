@@ -3,10 +3,9 @@
 //! The complete write is preflighted against hard operation budgets before the
 //! single bounded transaction begins. Statements are fixed and parameterized.
 
-use std::{
-    collections::BTreeSet,
-    io::{self, Write},
-};
+#[cfg(test)]
+use std::collections::BTreeSet;
+use std::io::{self, Write};
 
 use rootlight_ids::{ContentHash, FactId, FileId, RepositoryId, SymbolId};
 use rootlight_ir::{
@@ -51,7 +50,7 @@ impl RegistryIdentity {
 }
 
 pub(crate) struct WritePlan<'a> {
-    pub(crate) identities: BTreeSet<RegistryIdentity>,
+    pub(crate) identities: Vec<RegistryIdentity>,
     pub(crate) source_ordinals: Vec<&'a SourceRef>,
     pub(crate) stats: GenerationStats,
     pub(crate) maximum_payload_bytes: u64,
@@ -277,11 +276,38 @@ fn measure_with_policy<'a>(
                 .checked_add(1)
                 .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))
         })?;
+    let logical_records = [
+        usize_to_u64(document.files.len())?,
+        usize_to_u64(document.entities.len())?,
+        usize_to_u64(document.occurrences.len())?,
+        usize_to_u64(document.relations.len())?,
+        usize_to_u64(document.provenance.len())?,
+        usize_to_u64(document.source_mappings.len())?,
+        usize_to_u64(document.coverage_records.len())?,
+        usize_to_u64(document.skipped_regions.len())?,
+        usize_to_u64(document.diagnostics.len())?,
+        usize_to_u64(document.extensions.len())?,
+    ];
+    let logical_rows = logical_records
+        .into_iter()
+        .try_fold(0_u64, u64::checked_add)
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))?;
+    let identity_rows = logical_rows
+        .checked_add(1)
+        .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))?;
+    context
+        .require(GenerationResource::Rows, identity_rows)
+        .map_err(CatalogError::control)?;
+    let identity_capacity = usize::try_from(identity_rows)
+        .map_err(|_| CatalogError::new(CatalogErrorKind::InvalidGeneration))?;
     let mut sources = Vec::new();
     sources
         .try_reserve_exact(source_capacity)
         .map_err(|_| CatalogError::new(CatalogErrorKind::Storage))?;
-    let mut identities = BTreeSet::new();
+    let mut identities = Vec::new();
+    identities
+        .try_reserve_exact(identity_capacity)
+        .map_err(|_| CatalogError::new(CatalogErrorKind::Storage))?;
     let mut child_rows = 0_u64;
     let mut text_bytes = 0_u64;
     let mut maximum_payload_bytes = 0_u64;
@@ -505,6 +531,13 @@ fn measure_with_policy<'a>(
         maximum_payload_bytes = maximum_payload_bytes.max(bytes);
     }
 
+    sort_measured_values(&mut identities, context)?;
+    for pair in identities.windows(2) {
+        context.check().map_err(CatalogError::control)?;
+        if pair[0] == pair[1] {
+            return Err(CatalogError::new(CatalogErrorKind::InvalidGeneration));
+        }
+    }
     if sources.len() != source_capacity {
         return Err(CatalogError::new(CatalogErrorKind::InvalidGeneration));
     }
@@ -536,22 +569,6 @@ fn measure_with_policy<'a>(
     context
         .require(GenerationResource::SourceReferences, source_count)
         .map_err(CatalogError::control)?;
-    let logical_records = [
-        usize_to_u64(document.files.len())?,
-        usize_to_u64(document.entities.len())?,
-        usize_to_u64(document.occurrences.len())?,
-        usize_to_u64(document.relations.len())?,
-        usize_to_u64(document.provenance.len())?,
-        usize_to_u64(document.source_mappings.len())?,
-        usize_to_u64(document.coverage_records.len())?,
-        usize_to_u64(document.skipped_regions.len())?,
-        usize_to_u64(document.diagnostics.len())?,
-        usize_to_u64(document.extensions.len())?,
-    ];
-    let logical_rows = logical_records
-        .into_iter()
-        .try_fold(0_u64, u64::checked_add)
-        .ok_or_else(|| CatalogError::new(CatalogErrorKind::InvalidGeneration))?;
     let identity_rows = usize_to_u64(identities.len())?;
     if identity_rows
         != logical_rows
@@ -612,14 +629,15 @@ fn record_payload(
 }
 
 fn insert_measured_identity(
-    identities: &mut BTreeSet<RegistryIdentity>,
+    identities: &mut Vec<RegistryIdentity>,
     identity: RegistryIdentity,
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
     context.check().map_err(CatalogError::control)?;
-    if !identities.insert(identity) {
+    if identities.len() == identities.capacity() {
         return Err(CatalogError::new(CatalogErrorKind::InvalidGeneration));
     }
+    identities.push(identity);
     context
         .require(GenerationResource::Rows, usize_to_u64(identities.len())?)
         .map_err(CatalogError::control)
@@ -751,19 +769,26 @@ fn sort_source_references(
     sources: &mut [&SourceRef],
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
-    for start in (0..sources.len() / 2).rev() {
-        sift_source_references(sources, start, sources.len(), context)?;
+    sort_measured_values(sources, context)
+}
+
+fn sort_measured_values<T: Ord>(
+    values: &mut [T],
+    context: &GenerationContext<'_>,
+) -> Result<(), CatalogError> {
+    for start in (0..values.len() / 2).rev() {
+        sift_measured_values(values, start, values.len(), context)?;
     }
-    for end in (1..sources.len()).rev() {
+    for end in (1..values.len()).rev() {
         context.check().map_err(CatalogError::control)?;
-        sources.swap(0, end);
-        sift_source_references(sources, 0, end, context)?;
+        values.swap(0, end);
+        sift_measured_values(values, 0, end, context)?;
     }
     Ok(())
 }
 
-fn sift_source_references(
-    sources: &mut [&SourceRef],
+fn sift_measured_values<T: Ord>(
+    values: &mut [T],
     mut root: usize,
     end: usize,
     context: &GenerationContext<'_>,
@@ -771,13 +796,13 @@ fn sift_source_references(
     while root < end / 2 {
         context.check().map_err(CatalogError::control)?;
         let mut child = root * 2 + 1;
-        if child + 1 < end && sources[child] < sources[child + 1] {
+        if child + 1 < end && values[child] < values[child + 1] {
             child += 1;
         }
-        if sources[root] >= sources[child] {
+        if values[root] >= values[child] {
             break;
         }
-        sources.swap(root, child);
+        values.swap(root, child);
         root = child;
     }
     Ok(())
@@ -941,7 +966,7 @@ fn insert_header(
 
 fn insert_identities(
     transaction: &Transaction<'_>,
-    identities: &BTreeSet<RegistryIdentity>,
+    identities: &[RegistryIdentity],
     context: &GenerationContext<'_>,
 ) -> Result<(), CatalogError> {
     let mut statement = transaction

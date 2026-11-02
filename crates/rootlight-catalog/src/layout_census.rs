@@ -548,10 +548,7 @@ impl OracleLayoutFragment {
             .and_then(|n| n.checked_add(document.diagnostics.len()))
             .and_then(|n| n.checked_add(document.extensions.len()))
             .ok_or_else(invalid)?;
-        let registry = u64::try_from(logical.checked_add(1).ok_or_else(invalid)?)
-            .map_err(|_| invalid())?
-            .checked_mul(read::tree_node_bytes::<RegistryIdentity, ()>()?)
-            .ok_or_else(invalid)?;
+        let registry = bytes::<RegistryIdentity>(logical.checked_add(1).ok_or_else(invalid)?)?;
         let workspace = other_resident_bytes
             .checked_add(registry)
             .and_then(|n| n.checked_add(bytes::<&SourceRef>(inputs).ok()?))
@@ -572,6 +569,14 @@ impl OracleLayoutFragment {
             .try_reserve_exact(payloads)
             .map_err(|_| storage())?;
         let plan = write::measure_view(document, context, Some(&mut auxiliary))?;
+        let registry_capacity = bytes::<RegistryIdentity>(plan.identities.capacity())?;
+        if registry_capacity > registry {
+            let actual = workspace
+                .checked_add(registry_capacity - registry)
+                .ok_or_else(invalid)?;
+            admit(actual).map_err(OracleReadAdmissionError::Admission)?;
+        }
+        let registry = registry_capacity;
         let entity_flag_rows = document.entities.iter().try_fold(0_u64, |rows, entity| {
             context.check().map_err(CatalogError::control)?;
             let flags = u64::try_from(entity.flags.len()).map_err(|_| invalid())?;

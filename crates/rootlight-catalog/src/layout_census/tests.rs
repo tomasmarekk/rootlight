@@ -2,7 +2,11 @@
 //! The sealed Oracle and its independently reopened plan are the comparison
 //! authority; tests do not infer restore rows from serialized normalized IR.
 
-use std::{cell::Cell, collections::BTreeMap};
+use std::{
+    cell::Cell,
+    collections::{BTreeMap, BTreeSet},
+    time::Instant,
+};
 
 use rootlight_cancel::{Cancellation, CancellationReason};
 use rootlight_ids::{FactId, SymbolId};
@@ -1188,4 +1192,223 @@ fn borrowed_target_records_match_owned_writer_fragments_without_payload_clones()
             .read_memory_plan(&context)
             .unwrap()
     );
+}
+
+#[test]
+fn sorted_registry_matches_set_oracle_serialization_and_full_fragment() {
+    let cancellation = Cancellation::new();
+    let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+    let mut document = all_layout_features();
+    document.files.reverse();
+    document.entities.reverse();
+    let mut expected = BTreeSet::from([RegistryIdentity::Repository(document.repository)]);
+    expected.extend(
+        document
+            .files
+            .iter()
+            .map(|file| RegistryIdentity::File(file.id)),
+    );
+    expected.extend(
+        document
+            .entities
+            .iter()
+            .map(|entity| RegistryIdentity::Entity(entity.id)),
+    );
+    expected.extend(
+        document
+            .occurrences
+            .iter()
+            .map(|record| record.id)
+            .chain(document.relations.iter().map(|record| record.id))
+            .chain(document.provenance.iter().map(|record| record.id))
+            .chain(document.source_mappings.iter().map(|record| record.id))
+            .chain(document.coverage_records.iter().map(|record| record.id))
+            .chain(document.skipped_regions.iter().map(|record| record.id))
+            .chain(document.diagnostics.iter().map(|record| record.id))
+            .chain(document.extensions.iter().map(|record| record.id))
+            .map(RegistryIdentity::Fact),
+    );
+    let plan = write::measure_document(&document, &context, None).unwrap();
+    assert_eq!(
+        plan.identities,
+        expected.iter().copied().collect::<Vec<_>>()
+    );
+    assert!(plan.identities.windows(2).all(|pair| pair[0] < pair[1]));
+    drop(plan);
+    let generation = snapshot(document);
+    let expected_document = generation.document().clone();
+    let fragment = measure(&expected_document, &context);
+    let prospective = fragment.read_memory_plan(&context).unwrap();
+    assert_eq!(
+        prospective.identity_registry_rows(),
+        u64::try_from(expected.len()).unwrap()
+    );
+    let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let reader = OracleWriter::create_in(root.path())
+        .unwrap()
+        .seal_unverified_for_test(generation, &context)
+        .unwrap();
+    let connection = rusqlite::Connection::open_with_flags(
+        &reader.path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let mut statement = connection
+        .prepare("SELECT kind, identity FROM identity_registry ORDER BY kind, identity")
+        .unwrap();
+    let actual = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let serialized_oracle = expected
+        .iter()
+        .map(|identity| (identity.kind().to_owned(), identity.bytes().to_vec()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    assert_eq!(actual, serialized_oracle);
+    drop(statement);
+    drop(connection);
+    assert_eq!(prospective, observed_plan(&reader, &context));
+    drop(reader);
+    let reopened = OracleReader::open_in(root.path(), &context).unwrap();
+    assert_eq!(prospective, observed_plan(&reopened, &context));
+    assert_eq!(
+        reopened.read(&context).unwrap().document(),
+        &expected_document
+    );
+}
+
+#[test]
+fn contiguous_registry_admits_below_the_previous_tree_allowance() {
+    let cancellation = Cancellation::new();
+    let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+    let (mut document, _) = fixture_documents();
+    let template = document.entities[0].clone();
+    for ordinal in (0..4096_u64).rev() {
+        let mut entity = template.clone();
+        let mut id = [0x77; 20];
+        id[..8].copy_from_slice(&ordinal.to_be_bytes());
+        entity.id = SymbolId::from_bytes(id);
+        entity.evidence.source = None;
+        entity.evidence.derivation.clear();
+        document.entities.push(entity);
+    }
+    let plan = write::measure_document(&document, &context, None).unwrap();
+    let count = u64::try_from(plan.identities.len()).unwrap();
+    let capacity = u64::try_from(plan.identities.capacity()).unwrap();
+    let key_bytes = u64::try_from(size_of::<RegistryIdentity>()).unwrap();
+    let old_registry_bytes = read::tree_node_bytes::<RegistryIdentity, ()>().unwrap() * count;
+    let new_registry_bytes = key_bytes * capacity;
+    // The old registry alone exceeds this budget, before any source or fragment owner.
+    let cap = old_registry_bytes - 1;
+    let peak = Cell::new(0_u64);
+    let fragment = OracleLayoutFragment::measure(&document, 0, &context, &mut |bytes| {
+        peak.set(peak.get().max(bytes));
+        if bytes <= cap {
+            Ok(())
+        } else {
+            Err("registry workspace cap")
+        }
+    })
+    .unwrap();
+    assert!(peak.get() < old_registry_bytes);
+    assert!(new_registry_bytes < old_registry_bytes);
+    assert!(
+        peak.get() >= new_registry_bytes + fragment.retained_bytes().unwrap(),
+        "the independent fragment owner must remain charged beside the registry"
+    );
+    assert_eq!(
+        fragment.read_memory_plan(&context).unwrap().stats(),
+        plan.stats
+    );
+    println!(
+        "REGISTRY_WORKSPACE key_bytes={key_bytes} identities={count} capacity={capacity} old_registry_bytes={old_registry_bytes} new_registry_bytes={new_registry_bytes} actual_peak_bytes={} fragment_retained_bytes={} cap_bytes={cap}",
+        peak.get(),
+        fragment.retained_bytes().unwrap()
+    );
+}
+
+#[test]
+fn registry_changes_preserve_duplicate_control_and_reconstruction_refusals() {
+    let cancellation = Cancellation::new();
+    let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+    let (document, _) = fixture_documents();
+    let mut duplicate = document.clone();
+    duplicate.files.push(duplicate.files[0].clone());
+    assert_eq!(
+        write::measure_document(&duplicate, &context, None)
+            .err()
+            .unwrap()
+            .kind(),
+        CatalogErrorKind::InvalidGeneration
+    );
+    assert!(
+        matches!(OracleLayoutFragment::measure(&duplicate, 0, &context, &mut |_| Ok::<_, ()>(())),
+        Err(OracleReadAdmissionError::Catalog(error)) if error.kind() == CatalogErrorKind::InvalidGeneration)
+    );
+    for expired in [false, true] {
+        let stopped = if expired {
+            Cancellation::with_deadline(Instant::now())
+        } else {
+            Cancellation::new()
+        };
+        if !expired {
+            assert!(stopped.cancel(CancellationReason::ClientRequest));
+        }
+        let stopped_context = GenerationContext::new(&stopped, GenerationBudget::default());
+        let called = Cell::new(false);
+        assert!(
+            matches!(OracleLayoutFragment::measure(&document, 0, &stopped_context, &mut |_| {
+            called.set(true); Ok::<_, ()>(())
+        }), Err(OracleReadAdmissionError::Catalog(error)) if error.kind() == CatalogErrorKind::Cancelled)
+        );
+        assert!(!called.get());
+        assert_eq!(
+            write::measure_document(&document, &stopped_context, None)
+                .err()
+                .unwrap()
+                .kind(),
+            CatalogErrorKind::Cancelled
+        );
+        assert_eq!(
+            stopped.reason(),
+            Some(if expired {
+                CancellationReason::DeadlineExceeded
+            } else {
+                CancellationReason::ClientRequest
+            })
+        );
+    }
+    let interrupted = Cancellation::new();
+    let interrupted_context = GenerationContext::new(&interrupted, GenerationBudget::default());
+    assert!(
+        matches!(OracleLayoutFragment::measure(&document, 0, &interrupted_context, &mut |_| {
+        assert!(interrupted.cancel(CancellationReason::ClientRequest)); Ok::<_, ()>(())
+    }), Err(OracleReadAdmissionError::Catalog(error)) if error.kind() == CatalogErrorKind::Cancelled)
+    );
+    for sql in [
+        "UPDATE identity_registry SET identity = zeroblob(20) WHERE kind = 'fact' AND identity = (SELECT extension_id FROM extensions LIMIT 1)",
+        "UPDATE source_refs SET content_hash = zeroblob(32) WHERE ordinal = 0",
+    ] {
+        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let reader = OracleWriter::create_in(root.path())
+            .unwrap()
+            .seal_unverified_for_test(snapshot(document.clone()), &context)
+            .unwrap();
+        let path = reader.path.clone();
+        drop(reader);
+        let connection = rusqlite::Connection::open(path).unwrap();
+        assert_eq!(connection.execute(sql, []).unwrap(), 1);
+        drop(connection);
+        let reader = OracleReader::open_in(root.path(), &context).unwrap();
+        assert_eq!(
+            reader.read(&context).err().unwrap().kind(),
+            CatalogErrorKind::Corrupt,
+            "same-cardinality corruption must remain a reconstruction refusal: {sql}"
+        );
+    }
 }
