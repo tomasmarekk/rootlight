@@ -27,6 +27,7 @@ use crate::{
     new_lexical_evidence_envelope, new_lexical_summary_batch_envelope,
     new_symbol_identity_claim_envelope,
 };
+use crate::{DQL_QUERY_NAMESPACE, decode_dql_query_envelope, new_dql_query_envelope};
 use crate::{
     FSHARP_BINDING_NAMESPACE, decode_fsharp_binding_envelope, new_fsharp_binding_envelope,
 };
@@ -997,6 +998,7 @@ fn require_supported_extensions_with_checkpoint(
                 | GROOVY_BINDING_NAMESPACE
                 | RUST_DIRECT_CALL_NAMESPACE
                 | RDF_STATEMENT_NAMESPACE
+                | DQL_QUERY_NAMESPACE
                 | GROOVY_TYPE_LOOKUP_NAMESPACE
                 | GROOVY_CALLABLE_NAMESPACE
                 | GROOVY_MEMBER_NAMESPACE
@@ -1693,6 +1695,13 @@ fn rebind_extension(
             let evidence = decode_groovy_binding_envelope(&extension)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
             new_groovy_binding_envelope(repository, generation, provenance, source, evidence)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)
+        }
+        DQL_QUERY_NAMESPACE => {
+            let query = decode_dql_query_envelope(&extension)
+                .and_then(|query| query.rebind(generation))
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            new_dql_query_envelope(provenance, &query)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)
         }
         RDF_STATEMENT_NAMESPACE => {

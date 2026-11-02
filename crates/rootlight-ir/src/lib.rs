@@ -23,6 +23,7 @@ pub use aggregate_source_recovery::{
     decode_aggregate_source_recovery_envelope, new_aggregate_source_origin_envelope,
     new_aggregate_source_recovery_envelope,
 };
+mod dql_query;
 mod fsharp_binding;
 mod groovy_binding;
 mod groovy_call_lookup;
@@ -40,6 +41,11 @@ mod source_projection;
 mod validation;
 mod vba_compilation;
 
+pub use dql_query::{
+    DQL_QUERY_NAMESPACE, DQL_QUERY_VERSION, DqlBooleanOperator, DqlCallKind, DqlLiteralKind,
+    DqlNode, DqlNodeKind, DqlQuery, DqlQueryError, DqlReference, MAX_DQL_QUERY_NODES,
+    MAX_DQL_QUERY_PAYLOAD_BYTES, decode_dql_query_envelope, new_dql_query_envelope,
+};
 pub use fsharp_binding::{
     FSHARP_BINDING_NAMESPACE, FSHARP_BINDING_VERSION, FSHARP_IMPORT_BINDING_VERSION,
     FSHARP_OPENED_BINDING_VERSION, FSHARP_SIGNATURE_ALIAS_BINDING_VERSION,
