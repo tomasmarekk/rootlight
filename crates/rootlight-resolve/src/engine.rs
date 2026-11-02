@@ -1618,8 +1618,9 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     {
         return false;
     }
-    // Literal GYP source paths do not denote same-spelled build-target symbols.
-    if occurrence.syntax_kind.starts_with("gyp.")
+    // Source paths and host filters do not denote same-spelled local symbols.
+    if (occurrence.syntax_kind.starts_with("gyp.")
+        || occurrence.syntax_kind == "vento.filter_name.reference")
         && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
     {
         return false;
@@ -3591,6 +3592,7 @@ mod scala_formal_source_tests {
             "scala.unproven_formal.reference",
             "c.formal_return.reference",
             "gyp.source_path.reference",
+            "vento.filter_name.reference",
         ] {
             let repository = RepositoryId::from_bytes([1; 16]);
             let generation = GenerationId::from_bytes([2; 20]);

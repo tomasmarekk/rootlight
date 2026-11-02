@@ -95,7 +95,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.102";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.103";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3081,6 +3081,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
     LanguageCapability {
         language: "gyp",
         suffixes: &[".gyp", ".gypi"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "vento",
+        suffixes: &[".vto"],
         aliases: &[],
         detectors: &["extension", "configuration"],
         maximum_tier: "tier_d",
@@ -7496,6 +7504,65 @@ max_source_file_bytes = 2097152
             .unwrap();
         assert_eq!(capability.maximum_tier, "tier_d");
         assert_eq!(capability.analyzers, &["treesitter"]);
+    }
+
+    #[test]
+    fn vento_discovery_preserves_sources_overrides_and_template_language_boundaries() {
+        let temporary = local_tempdir();
+        let contents =
+            include_bytes!("../../../tests/native-grammars/fixtures/vento/badly_formatted.vto");
+        write_fixture(&temporary, "template.VTO", contents);
+        write_fixture(&temporary, "assigned.conf", contents);
+        write_fixture(&temporary, "overridden.vto", b"def authored():\n    pass\n");
+        write_fixture(&temporary, "other.njk", b"{{ \"value\" | upper }}");
+        let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+            source: rootlight_config::ConfigSource::User,
+            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nconf='vento'\n[extensions.source-languages.data.paths]\n'overridden.vto'='python'\n",
+        }]).unwrap();
+        let root = fixture_root(&temporary, b"vento-discovery");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let manifest = discover(
+            &root,
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        for (path, language, evidence) in [
+            ("template.VTO", "vento", LanguageEvidence::Extension),
+            ("assigned.conf", "vento", LanguageEvidence::Configuration),
+            ("overridden.vto", "python", LanguageEvidence::Configuration),
+        ] {
+            let input = manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            assert!(
+                input
+                    .language_signals
+                    .iter()
+                    .any(|signal| signal.language == language && signal.evidence == evidence)
+            );
+            if language == "vento" {
+                assert_eq!(input.content_hash, rootlight_ids::content_hash(contents));
+                assert_eq!(input.bytes, 52);
+            }
+        }
+        assert_eq!(canonical_language("vento"), Some("vento"));
+        assert_ne!(extension_language("other.njk"), Some("vento"));
+        assert_eq!(extension_language("template.vto.bak"), None);
+        assert!(
+            !manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == "other.njk")
+                .unwrap()
+                .language_signals
+                .iter()
+                .any(|signal| signal.language == "vento")
+        );
     }
 
     #[test]
