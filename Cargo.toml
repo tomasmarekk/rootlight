@@ -52,6 +52,7 @@ members = [
 ]
 exclude = [
     "native-grammars/nquads",
+    "native-grammars/nquads-dgraph",
     "native-grammars/ntriples",
     "third_party/tree-sitter-sparql-0.1.0",
     "third_party/tree-sitter-n3-0.1.0",

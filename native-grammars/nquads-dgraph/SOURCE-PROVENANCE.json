@@ -1,0 +1,148 @@
+{
+  "schema": "rootlight.native-grammar-source-provenance/1",
+  "authorship": "locally maintained native Dgraph statement grammar derived from the retained native N-Quads lexical machinery; no upstream grammar release or archive is claimed",
+  "native_semantic_origin": {
+    "repository": "https://github.com/dgraph-io/dgraph",
+    "revision": "c587cba75f60445125459b46b4d81757a73384aa",
+    "reviewed_contract_files": [
+      "chunker/rdf_parser.go",
+      "chunker/rdf_state.go",
+      "lex/iri.go",
+      "lex/lexer.go"
+    ],
+    "upstream_license": "Apache-2.0",
+    "retained_notice": "LICENSE-DGRAPH",
+    "interpretation": "Angle identifiers remain verbatim native identifiers, including relative and angle UID spellings. Default-value escape syntax follows the native lexer and Go unquoting; byte escapes are not asserted Unicode. Fourth terms are native namespaces, never RDF graph names.",
+    "license_retention": {
+      "upstream_path": "LICENSE.txt",
+      "upstream_original": {
+        "bytes": 11358,
+        "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
+      },
+      "retained_path": "LICENSE-DGRAPH",
+      "retained_normalized": {
+        "bytes": 11357,
+        "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1"
+      },
+      "normalization": "Remove only one redundant blank line at EOF, retaining a single final LF. All preceding license and notice bytes remain identical.",
+      "text_or_notice_changes": false
+    }
+  },
+  "lexical_origin": {
+    "preferred_inputs": [
+      {
+        "path": "native-grammars/nquads/grammar.js",
+        "bytes": 2659,
+        "sha256": "e42c1f3da87e241c744beda54c2d918ca31035876b62198b9b7b302ef74d4a1e"
+      },
+      {
+        "path": "native-grammars/nquads/src/scanner.c",
+        "bytes": 2878,
+        "sha256": "c19fbdb075f255928cb105291e1fe1ad9bee896bd2c0d0d9c634ab7914a349cb"
+      }
+    ],
+    "mit_lexical_origin": {
+      "repository": "https://github.com/GordianDziwis/tree-sitter-turtle",
+      "revision": "7f789ea7ef765080f71a298fc96b7c957fa24422",
+      "notice": "LICENSE-MIT"
+    },
+    "retained_contract": "physical lines, ABI14 factory, EOF-aware stateless strings and comments, full physical source spans; standard N-Quads grammar is unchanged"
+  },
+  "native_statement": {
+    "kind": "quad",
+    "required_fields": [
+      "subject",
+      "predicate",
+      "object"
+    ],
+    "identifier_kind": "identifier",
+    "object_kinds": [
+      "identifier",
+      "default_value"
+    ],
+    "graph_field": false,
+    "scope": "Bounded angle-identifier and default-value family. Namespace, blank-label, facet, function and typed/language-value syntax is not admitted by this grammar. Predicate language interpretation and identifier sanity remain native semantic checks."
+  },
+  "generator": {
+    "name": "tree-sitter",
+    "version": "0.26.8",
+    "executable_sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0",
+    "abi": 14,
+    "command": [
+      "tree-sitter",
+      "generate",
+      "--abi",
+      "14",
+      "--js-runtime",
+      "native"
+    ],
+    "invoked_during_compilation": false
+  },
+  "preferred_inputs": [
+    {
+      "path": "grammar.js",
+      "bytes": 965,
+      "sha256": "a1a42cedecdbe34360d896663baea1132a818b435cfa0e96df458317c0b6a7eb"
+    },
+    {
+      "path": "src/scanner.c",
+      "bytes": 2968,
+      "sha256": "9c771ecb90f23e6c1a164df4a1e2570f61d181658f947b380bd3ed1fd67ddda7"
+    }
+  ],
+  "generated_outputs": [
+    {
+      "path": "src/grammar.json",
+      "bytes": 3519,
+      "sha256": "a843931a1176c8821f6f39302c62b79571322e157f21ea4127aabaf692e70a37"
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 1480,
+      "sha256": "82aa2d4d71a759aae0b47b074ea4f06e5c86d25c4f96c0f2fe42c61de21bc8bf"
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 14054,
+      "sha256": "e39ff6358d3f7c74835e0fd778071ec715f8740e08819a99f98cc8d0655b5dfe"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    }
+  ],
+  "license_scope": {
+    "local_authored_code": "AGPL-3.0-only",
+    "local_license": "LICENSE",
+    "retained_lexical_origin_license": "MIT",
+    "retained_lexical_origin_notice": "LICENSE-MIT",
+    "generated_tree_sitter_headers_notice": "LICENSE.tree-sitter",
+    "native_contract_and_fixture_notice": "LICENSE-DGRAPH",
+    "upstream_material_not_relicensed": true
+  },
+  "binding": {
+    "external_scanner": true,
+    "scanner_state": "none",
+    "compilation_generates_or_downloads": false,
+    "native_build_inputs": [
+      "src/parser.c",
+      "src/scanner.c",
+      "src/tree_sitter/parser.h",
+      "src/tree_sitter/alloc.h",
+      "src/tree_sitter/array.h"
+    ],
+    "leading_utf8_bom": "Tree-sitter runtime skips the leading three-byte UTF-8 encoding marker before lexing. Document spans begin after this marker; term offsets remain physical and are not rebased. Source capture must retain the complete encoding prefix independently."
+  },
+  "scope": "Native bounded syntax and physical role ownership only; registry, lowering, discovery, service integration, repository187 registration and corpus qualification remain separate."
+}

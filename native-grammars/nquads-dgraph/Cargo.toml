@@ -1,0 +1,24 @@
+# Standalone native syntax binding; generation is a separate maintainer action.
+[package]
+name = "rootlight-tree-sitter-nquads-dgraph"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "AGPL-3.0-only"
+description = "Locally maintained native Dgraph N-Quads syntax grammar"
+publish = false
+build = "bindings/rust/build.rs"
+
+[workspace]
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"
+
+[dev-dependencies]
+tree-sitter = "=0.26.11"
