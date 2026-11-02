@@ -16,3 +16,12 @@ It names the abapGit Contributors, 2014.
 The native test checks exact interface and method name spans and their AST
 containment. It does not establish parameter bindings, semantic indexing,
 service integration or coverage of the remaining original ABAP sources.
+
+`zif_abapgit_definitions.intf.abap` preserves the exact physical and Git bytes of
+`src/zif_abapgit_definitions.intf.abap` from that same pinned representative.
+Its Git blob is `83f3fe336d6b689a592bc21219f157a6c9266de2`; it is 16,094 bytes,
+SHA-256 `f56034e1f1d02794462d775025b8b44196a2b7f8b35e595f23228be66d35c24c`.
+The same complete `LICENSE.ABAPGIT` notice applies. This second fixture retains
+the original source whose generic content hint previously selected C++ when
+`.abap` had no default route; it does not establish its unmodeled declarations'
+semantic coverage.

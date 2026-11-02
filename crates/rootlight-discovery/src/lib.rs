@@ -95,7 +95,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.103";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.104";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3081,6 +3081,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
     LanguageCapability {
         language: "gyp",
         suffixes: &[".gyp", ".gypi"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "abap",
+        suffixes: &[".abap"],
         aliases: &[],
         detectors: &["extension", "configuration"],
         maximum_tier: "tier_d",
@@ -7504,6 +7512,97 @@ max_source_file_bytes = 2097152
             .unwrap();
         assert_eq!(capability.maximum_tier, "tier_d");
         assert_eq!(capability.analyzers, &["treesitter"]);
+    }
+
+    #[test]
+    fn abap_defaults_preserve_original_sources_and_explicit_overrides() {
+        let temporary = local_tempdir();
+        let original = include_bytes!(
+            "../../../tests/native-grammars/fixtures/abap/zif_abapgit_gui_renderable.intf.abap"
+        );
+        let definitions = include_bytes!(
+            "../../../tests/native-grammars/fixtures/abap/zif_abapgit_definitions.intf.abap"
+        );
+        assert_eq!(definitions.len(), 16_094);
+        write_fixture(&temporary, "original.abap", original);
+        write_fixture(&temporary, "definitions.ABAP", definitions);
+        write_fixture(&temporary, "assigned.conf", original);
+        write_fixture(&temporary, "override.abap", b"def authored():\n    pass\n");
+        write_fixture(&temporary, "backup.abap.bak", original);
+        let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+            source: rootlight_config::ConfigSource::User,
+            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nconf='abap'\n[extensions.source-languages.data.paths]\n'override.abap'='python'\n",
+        }]).unwrap();
+        let root = fixture_root(&temporary, b"abap-discovery");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let manifest = discover(
+            &root,
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        for (path, language, evidence, raw) in [
+            (
+                "original.abap",
+                "abap",
+                LanguageEvidence::Extension,
+                original.as_slice(),
+            ),
+            (
+                "definitions.ABAP",
+                "abap",
+                LanguageEvidence::Extension,
+                definitions.as_slice(),
+            ),
+            (
+                "assigned.conf",
+                "abap",
+                LanguageEvidence::Configuration,
+                original.as_slice(),
+            ),
+        ] {
+            let input = manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            assert!(
+                input
+                    .language_signals
+                    .iter()
+                    .any(|signal| signal.language == language && signal.evidence == evidence)
+            );
+            assert_eq!(input.bytes, u64::try_from(raw.len()).unwrap());
+            assert_eq!(input.content_hash, rootlight_ids::content_hash(raw));
+        }
+        let configured = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "override.abap")
+            .unwrap();
+        assert!(
+            configured
+                .language_signals
+                .iter()
+                .any(|signal| signal.language == "python"
+                    && signal.evidence == LanguageEvidence::Configuration)
+        );
+        assert_eq!(canonical_language("abap"), Some("abap"));
+        assert_eq!(extension_language("original.ABAP"), Some("abap"));
+        assert_eq!(extension_language("native.cpp"), Some("cpp"));
+        assert_eq!(extension_language("backup.abap.bak"), None);
+        assert!(
+            manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == "backup.abap.bak")
+                .unwrap()
+                .language_signals
+                .iter()
+                .all(|signal| signal.language != "abap")
+        );
     }
 
     #[test]
