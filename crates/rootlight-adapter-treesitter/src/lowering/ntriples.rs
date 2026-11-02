@@ -11,6 +11,7 @@ enum Format {
     #[default]
     NTriples,
     NQuads,
+    Dgraph,
 }
 
 impl Format {
@@ -18,6 +19,7 @@ impl Format {
         match language {
             "ntriples" => Some(Self::NTriples),
             "nquads" => Some(Self::NQuads),
+            "nquads-dgraph" => Some(Self::Dgraph),
             _ => None,
         }
     }
@@ -26,6 +28,7 @@ impl Format {
         match self {
             Self::NTriples => "ntriples-native-statement-evidence-unavailable",
             Self::NQuads => "nquads-native-statement-evidence-unavailable",
+            Self::Dgraph => "nquads-dgraph-native-statement-evidence-unavailable",
         }
     }
 
@@ -33,19 +36,24 @@ impl Format {
         match self {
             Self::NTriples => "ntriples-whole-physical-utf8-source-required",
             Self::NQuads => "nquads-whole-physical-utf8-source-required",
+            Self::Dgraph => "nquads-dgraph-whole-physical-utf8-source-required",
         }
     }
 
     fn role(self, kind: &str) -> Option<usize> {
         match (self, kind) {
             (Self::NTriples, "ntriples.statement.expression")
-            | (Self::NQuads, "nquads.statement.expression") => Some(0),
+            | (Self::NQuads, "nquads.statement.expression")
+            | (Self::Dgraph, "nquads-dgraph.statement.expression") => Some(0),
             (Self::NTriples, "ntriples.subject.expression")
-            | (Self::NQuads, "nquads.subject.expression") => Some(1),
+            | (Self::NQuads, "nquads.subject.expression")
+            | (Self::Dgraph, "nquads-dgraph.subject.expression") => Some(1),
             (Self::NTriples, "ntriples.predicate.expression")
-            | (Self::NQuads, "nquads.predicate.expression") => Some(2),
+            | (Self::NQuads, "nquads.predicate.expression")
+            | (Self::Dgraph, "nquads-dgraph.predicate.expression") => Some(2),
             (Self::NTriples, "ntriples.object.expression")
-            | (Self::NQuads, "nquads.object.expression") => Some(3),
+            | (Self::NQuads, "nquads.object.expression")
+            | (Self::Dgraph, "nquads-dgraph.object.expression") => Some(3),
             (Self::NQuads, "nquads.graph.expression") => Some(4),
             _ => None,
         }
@@ -56,6 +64,7 @@ impl Format {
             && fact.syntax_kind().as_str().starts_with(match self {
                 Self::NTriples => "ntriples.",
                 Self::NQuads => "nquads.",
+                Self::Dgraph => "nquads-dgraph.",
             })
     }
 
@@ -64,10 +73,26 @@ impl Format {
         source: SourceRef,
         text: &str,
         proof: Statement,
-    ) -> Result<RdfStatement, rootlight_ir::RdfStatementError> {
+    ) -> Result<RdfStatement, &'static str> {
         match self {
-            Self::NTriples => RdfStatement::from_ntriples(source, text, proof.terms),
-            Self::NQuads => RdfStatement::from_nquads(source, text, proof.terms, proof.graph),
+            Self::NTriples => {
+                RdfStatement::from_ntriples(source, text, proof.terms).map_err(|_| self.gap())
+            }
+            Self::NQuads => RdfStatement::from_nquads(source, text, proof.terms, proof.graph)
+                .map_err(|_| self.gap()),
+            Self::Dgraph => {
+                RdfStatement::from_nquads_dgraph(source, text, proof.terms).map_err(|error| {
+                    match error {
+                        rootlight_ir::DgraphStatementError::InvalidEvidence => self.gap(),
+                        rootlight_ir::DgraphStatementError::UnsupportedConstruct => {
+                            "nquads-dgraph-native-construct-unmodeled"
+                        }
+                        rootlight_ir::DgraphStatementError::UnsupportedIdentifierCategory => {
+                            "nquads-dgraph-identifier-category-evidence-unavailable"
+                        }
+                    }
+                })
+            }
         }
     }
 }
@@ -278,13 +303,15 @@ impl Plan {
                 )?,
             )?;
             plan.peak(temporary)?;
-            let Ok(decoded) =
-                format.decode(source_for_span(source, statement.span), text, statement)
-            else {
-                plan.gap(line_span, format.gap(), metadata_bytes)?;
-                offset = full_end;
-                continue;
-            };
+            let decoded =
+                match format.decode(source_for_span(source, statement.span), text, statement) {
+                    Ok(decoded) => decoded,
+                    Err(detail) => {
+                        plan.gap(line_span, detail, metadata_bytes)?;
+                        offset = full_end;
+                        continue;
+                    }
+                };
             let mut payload = PayloadBytes(0);
             serde_json::to_writer(&mut payload, &decoded)
                 .map_err(|_| provider_failure("ntriples-payload-accounting"))?;
@@ -407,7 +434,7 @@ fn prove(
 ) -> Option<Statement> {
     if !matches!(
         (format, facts.len()),
-        (Format::NTriples, 4) | (Format::NQuads, 4 | 5)
+        (Format::NTriples | Format::Dgraph, 4) | (Format::NQuads, 4 | 5)
     ) {
         return None;
     }
@@ -430,9 +457,21 @@ fn prove(
     if first.is_some_and(|index| tail.get(index) != Some(&b'#')) {
         return None;
     }
+    let terms = [roles[1]?, roles[2]?, roles[3]?];
+    let mut previous = span.start_byte();
+    for term in terms.into_iter().chain(roles[4]) {
+        if term.file() != span.file()
+            || term.start_byte() < previous
+            || term.start_byte() >= term.end_byte()
+            || term.end_byte() > span.end_byte()
+        {
+            return None;
+        }
+        previous = term.end_byte();
+    }
     Some(Statement {
         span,
-        terms: [roles[1]?, roles[2]?, roles[3]?],
+        terms,
         graph: roles[4],
         payload_bytes: 0,
     })
@@ -451,5 +490,9 @@ pub(super) fn required(fact: &SyntaxFact) -> bool {
                 | "nquads.predicate.expression"
                 | "nquads.object.expression"
                 | "nquads.graph.expression"
+                | "nquads-dgraph.statement.expression"
+                | "nquads-dgraph.subject.expression"
+                | "nquads-dgraph.predicate.expression"
+                | "nquads-dgraph.object.expression"
         )
 }

@@ -14122,6 +14122,7 @@ fn is_haskell_type_annotation(fact: &SyntaxFact) -> bool {
 fn is_signature_capture(fact: &SyntaxFact) -> bool {
     if fact.syntax_kind().as_str().starts_with("ntriples.")
         || fact.syntax_kind().as_str().starts_with("nquads.")
+        || fact.syntax_kind().as_str().starts_with("nquads-dgraph.")
     {
         return false;
     }
@@ -14772,6 +14773,7 @@ fn is_native_rdf_file_transport(fact: &SyntaxFact, language: &str) -> bool {
             (language, fact.syntax_kind().as_str()),
             ("ntriples", "ntriples.file.module")
                 | ("nquads", "nquads.file.module")
+                | ("nquads-dgraph", "nquads-dgraph.file.module")
                 | ("turtle", "turtle.file.module")
         )
 }
@@ -14780,6 +14782,7 @@ fn is_native_rdf_file_transport(fact: &SyntaxFact, language: &str) -> bool {
 fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     if fact.syntax_kind().as_str().starts_with("ntriples.")
         || fact.syntax_kind().as_str().starts_with("nquads.")
+        || fact.syntax_kind().as_str().starts_with("nquads-dgraph.")
     {
         return None;
     }
@@ -14847,6 +14850,7 @@ fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
 fn structural_entity_kind_from_source(fact: &SyntaxFact, text: &str) -> Option<EntityKind> {
     if fact.syntax_kind().as_str().starts_with("ntriples.")
         || fact.syntax_kind().as_str().starts_with("nquads.")
+        || fact.syntax_kind().as_str().starts_with("nquads-dgraph.")
     {
         return None;
     }
@@ -16269,7 +16273,31 @@ mod tests {
             &fact(SyntaxFactKind::Module, "nquads.file.module"),
             "nquads"
         ));
+        assert!(is_native_rdf_file_transport(
+            &fact(SyntaxFactKind::Module, "nquads-dgraph.file.module"),
+            "nquads-dgraph"
+        ));
         for (candidate, language) in [
+            (
+                fact(SyntaxFactKind::Module, "nquads-dgraph.file.module"),
+                "nquads",
+            ),
+            (
+                fact(SyntaxFactKind::Module, "nquads.file.module"),
+                "nquads-dgraph",
+            ),
+            (
+                fact(SyntaxFactKind::Root, "nquads-dgraph.file.module"),
+                "nquads-dgraph",
+            ),
+            (
+                fact(SyntaxFactKind::Declaration, "nquads-dgraph.file.module"),
+                "nquads-dgraph",
+            ),
+            (
+                fact(SyntaxFactKind::Module, "nquads-dgraph.other.module"),
+                "nquads-dgraph",
+            ),
             (
                 fact(SyntaxFactKind::Module, "nquads.file.module"),
                 "ntriples",
