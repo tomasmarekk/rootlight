@@ -119,6 +119,8 @@ pub enum GrammarFamily {
     Python,
     /// GYP literal build descriptions over the authenticated Python native AST.
     Gyp,
+    /// Native Vento host declarations without embedded JavaScript evaluation.
+    Vento,
     /// JavaScript and JSX grammar with typed-syntax tolerance.
     JavaScript,
     /// Java grammar.
@@ -343,7 +345,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(117);
+        let mut descriptors = Vec::with_capacity(118);
         for family in [
             GrammarFamily::Dql,
             GrammarFamily::NTriples,
@@ -398,6 +400,7 @@ impl GrammarRegistry {
             GrammarFamily::Rust,
             GrammarFamily::Python,
             GrammarFamily::Gyp,
+            GrammarFamily::Vento,
             GrammarFamily::JavaScript,
             GrammarFamily::Java,
             GrammarFamily::Apex,
@@ -614,6 +617,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Capnp => tree_sitter_capnp::LANGUAGE.into(),
         GrammarFamily::Rust => tree_sitter_rust::LANGUAGE.into(),
         GrammarFamily::Python | GrammarFamily::Gyp => tree_sitter_python::LANGUAGE.into(),
+        GrammarFamily::Vento => tree_sitter_vento::LANGUAGE.into(),
         // TSX accepts ordinary JavaScript and JSX while retaining declarations
         // around type annotations that otherwise trigger file-wide recovery.
         GrammarFamily::JavaScript => tree_sitter_typescript::LANGUAGE_TSX.into(),
@@ -1559,6 +1563,15 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
                 "9609a2f92dbb7c32bc056fd8fb94e5478428f04496696aa08b048a9b66caf283",
             ),
         },
+        GrammarFamily::Vento => GrammarIdentity {
+            language_id: "vento",
+            grammar_version: "0.21.0",
+            source_package_sha256: "e60fffdf5c269b17061b6bdc2f2421c944c7769a2b4f9803b1cadba419b1f088",
+            parser_sha256: "c78e775f442ddbc529405f61ac90e7bc5be9199ab262473547997c708d945840",
+            scanner_sha256: Some(
+                "6c137960d69d7f10c128758039cf540a1ac35d471242e85ef6239795e997ede6",
+            ),
+        },
         GrammarFamily::Gyp => GrammarIdentity {
             language_id: "gyp",
             ..identity_for(GrammarFamily::Python)
@@ -1708,7 +1721,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 117);
+        assert_eq!(registry.descriptors().len(), 118);
         for family in [
             GrammarFamily::Dql,
             GrammarFamily::NTriples,
@@ -1762,6 +1775,7 @@ mod tests {
             GrammarFamily::Python,
             GrammarFamily::Gyp,
             GrammarFamily::JavaScript,
+            GrammarFamily::Vento,
             GrammarFamily::Java,
             GrammarFamily::Apex,
             GrammarFamily::Go,
@@ -1853,6 +1867,27 @@ mod tests {
         assert_eq!(json.parser_sha256(), jsonc.parser_sha256());
         assert_eq!(json.scanner_sha256(), jsonc.scanner_sha256());
         assert_eq!(json.abi_version(), jsonc.abi_version());
+    }
+
+    #[test]
+    fn vento_uses_its_pinned_native_parser_and_reviewed_scanner() {
+        let registry = GrammarRegistry::audited().unwrap();
+        let vento = registry.get(GrammarFamily::Vento).unwrap();
+        assert_eq!(vento.language().as_str(), "vento");
+        assert_eq!(vento.grammar_version(), "0.21.0");
+        assert_eq!(vento.abi_version(), 15);
+        assert_eq!(
+            vento.parser_sha256(),
+            "c78e775f442ddbc529405f61ac90e7bc5be9199ab262473547997c708d945840"
+        );
+        assert_eq!(
+            vento.scanner_sha256(),
+            Some("6c137960d69d7f10c128758039cf540a1ac35d471242e85ef6239795e997ede6")
+        );
+        assert_ne!(
+            vento.parser_sha256(),
+            registry.get(GrammarFamily::Html).unwrap().parser_sha256()
+        );
     }
 
     #[test]

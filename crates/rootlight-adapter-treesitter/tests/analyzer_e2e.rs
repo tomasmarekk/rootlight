@@ -183,6 +183,8 @@ mod typespec_native;
 mod v_native;
 #[path = "analyzer_e2e/vba_native.rs"]
 mod vba_native;
+#[path = "analyzer_e2e/vento.rs"]
+mod vento;
 #[path = "analyzer_e2e/vhdl_native.rs"]
 mod vhdl_native;
 #[path = "analyzer_e2e/wesl_native.rs"]

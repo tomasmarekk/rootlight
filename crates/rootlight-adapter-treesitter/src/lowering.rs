@@ -124,6 +124,7 @@ mod typescript_calls;
 mod typescript_const;
 mod typespec;
 mod v;
+mod vento;
 mod vhdl;
 mod wesl;
 mod wolfram;
@@ -977,6 +978,7 @@ fn required_syntax_fact_count_from_output(
             || cpp_const_formals::required(fact)
             || c_formal_reads::certified_reference(fact)
             || gyp::required(fact)
+            || vento::reference(fact)
             || c_variables::required(fact)
             || ruby_bindings::required(fact)
             || ruby_formal_receivers::required(fact)
@@ -11733,6 +11735,9 @@ fn wgsl_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
 }
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    if fact.syntax_kind().as_str().starts_with("vento.") {
+        return vento::gap(fact);
+    }
     if fact.syntax_kind().as_str().starts_with("gyp.") {
         return gyp::gap(fact);
     }
@@ -12376,6 +12381,9 @@ fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u
 }
 
 fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -> bool {
+    if language == "vento" {
+        return vento::written(kind, label);
+    }
     if language == "gyp" {
         return gyp::written(kind, label);
     }
@@ -13873,6 +13881,11 @@ fn test_source_path(path: &str) -> bool {
 }
 
 fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
+    if language == "vento" || fact.syntax_kind().as_str().starts_with("vento.") {
+        return language == "vento"
+            && fact.kind() == SyntaxFactKind::Module
+            && fact.syntax_kind().as_str() == "vento.file.module";
+    }
     if language == "gyp" || fact.syntax_kind().as_str().starts_with("gyp.") {
         return language == "gyp"
             && fact.kind() == SyntaxFactKind::Module
@@ -14196,6 +14209,9 @@ fn is_haskell_type_annotation(fact: &SyntaxFact) -> bool {
 }
 
 fn is_signature_capture(fact: &SyntaxFact) -> bool {
+    if fact.syntax_kind().as_str().starts_with("vento.") {
+        return false;
+    }
     if fact.syntax_kind().as_str().starts_with("gyp.") {
         return false;
     }
@@ -14969,6 +14985,9 @@ fn structural_entity_kind_from_source(fact: &SyntaxFact, text: &str) -> Option<E
 }
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    if vento::reference(fact) {
+        return Some("vento-filter-host-binding-unavailable");
+    }
     if gyp::required(fact) {
         return Some("gyp-written-source-path-resolution-unavailable");
     }

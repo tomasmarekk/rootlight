@@ -82,6 +82,7 @@ mod php_ordinary;
 mod php_this_calls;
 pub(crate) mod ruby_bindings;
 pub(crate) mod ruby_formal_receivers;
+mod vento;
 pub use identity_refusal::NativeIdentityRefusalDetails;
 use identity_refusal::{IdentityRefusal, RefusalOrigin};
 mod coffeescript;
@@ -687,6 +688,18 @@ impl QueryPack {
                 "definition",
                 "module",
                 "root",
+                "signature",
+            ];
+        }
+        if family == GrammarFamily::Vento {
+            expected = vec![
+                "comment",
+                "declaration",
+                "definition",
+                "module",
+                "reference",
+                "root",
+                "scope",
                 "signature",
             ];
         }
@@ -1324,6 +1337,10 @@ impl QueryPack {
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
                         && candidate.syntax == "gyp.source_path")
+                    || (family == GrammarFamily::Vento
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "vento.filter_name")
                     || (family == GrammarFamily::C
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
@@ -2028,6 +2045,19 @@ impl QueryPack {
                             input.source,
                             input.cancellation,
                         )?)?;
+                    }
+                    continue;
+                }
+                if input.family == GrammarFamily::Vento {
+                    if let Some(candidate) = vento::candidate(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.tree.root_node(),
+                        complete_file_input,
+                        input.cancellation,
+                    )? {
+                        retain(candidate)?;
                     }
                     continue;
                 }
@@ -4952,6 +4982,9 @@ fn candidate_for_capture(
             }
             GrammarFamily::Ron => return Err(query_failure("query-ron-data-call-unavailable")),
             GrammarFamily::Gyp => return Err(query_failure("query-gyp-data-call-unavailable")),
+            GrammarFamily::Vento => {
+                return Err(query_failure("query-vento-javascript-call-unavailable"));
+            }
             GrammarFamily::Toml => return Err(query_failure("query-toml-call-kind")),
             GrammarFamily::Yaml => return Err(query_failure("query-yaml-call-kind")),
             GrammarFamily::Html => return Err(query_failure("query-html-call-kind")),
@@ -6018,7 +6051,7 @@ impl QueryPackRegistry {
     }
 
     fn catalogue() -> Self {
-        let mut packs = Vec::with_capacity(117);
+        let mut packs = Vec::with_capacity(118);
         for (family, source) in [
             (
                 GrammarFamily::Clojure,
@@ -6034,6 +6067,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
             (GrammarFamily::Gyp, include_str!("../queries/gyp.scm")),
+            (GrammarFamily::Vento, include_str!("../queries/vento.scm")),
             (
                 GrammarFamily::JavaScript,
                 concat!(

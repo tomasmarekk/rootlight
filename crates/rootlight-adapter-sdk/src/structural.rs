@@ -262,6 +262,21 @@ pub fn structural_preprocessor_context_gaps(
 #[must_use]
 pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
+    if label.starts_with("vento.") {
+        return match (fact.kind(), label) {
+            (SyntaxFactKind::Module, "vento.file.module") => Some(EntityKind::Module),
+            (SyntaxFactKind::Declaration, "vento.function.declaration") => {
+                Some(EntityKind::Function)
+            }
+            (SyntaxFactKind::Declaration, "vento.parameter.declaration") => {
+                Some(EntityKind::Parameter)
+            }
+            (SyntaxFactKind::Declaration, "vento.variable.declaration") => {
+                Some(EntityKind::Variable)
+            }
+            _ => None,
+        };
+    }
     if label.starts_with("gyp.") {
         return match (fact.kind(), label) {
             (SyntaxFactKind::Module, "gyp.file.module") => Some(EntityKind::Module),
@@ -1472,6 +1487,23 @@ pub fn structural_captured_name_for_fact<'a>(
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
     let label = fact.syntax_kind().as_str();
+    if language == "vento" || label.starts_with("vento.") {
+        return (language == "vento"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && matches!(
+                label,
+                "vento.name.definition" | "vento.filter_name.reference"
+            )
+            && text.len() <= maximum_bytes
+            && text
+                .as_bytes()
+                .first()
+                .is_some_and(|b| b.is_ascii_alphabetic() || matches!(b, b'_' | b'$'))
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$')))
+        .then_some(Cow::Borrowed(text));
+    }
     if language == "gyp" || label.starts_with("gyp.") {
         return (language == "gyp"
             && label == "gyp.target_name.definition"
