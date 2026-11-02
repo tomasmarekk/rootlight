@@ -1,0 +1,75 @@
+--- a/src/scanner.c
++++ b/src/scanner.c
+@@ -30,6 +30,7 @@
+ void tree_sitter_vento_external_scanner_deserialize( void *payload, const char *buffer, unsigned length) {}
+ 
+ static bool handle_delimiters(TSLexer *lexer, const char excluded_character);
++static bool scan_quoted_string(TSLexer *lexer);
+ 
+ static void skip_whitespace(TSLexer *lexer) {
+   while (iswspace(lexer->lookahead)) {
+@@ -213,6 +214,40 @@
+   return false;
+ }
+ 
++// Quoted delimiters belong to JavaScript source, never to the Vento host.
++// Template interpolation reuses the existing balanced-object scanner so an
++// inner template cannot terminate its enclosing quoted source prematurely.
++static bool scan_quoted_string(TSLexer *lexer) {
++  const int32_t quote = lexer->lookahead;
++  lexer->advance(lexer, false);
++  while (!lexer->eof(lexer)) {
++    if (lexer->lookahead == quote) {
++      lexer->advance(lexer, false);
++      return true;
++    }
++    if (lexer->lookahead == '\\') {
++      lexer->advance(lexer, false);
++      if (lexer->eof(lexer)) return false;
++      const bool carriage_return = lexer->lookahead == '\r';
++      lexer->advance(lexer, false);
++      if (carriage_return && lexer->lookahead == '\n') {
++        lexer->advance(lexer, false);
++      }
++      continue;
++    }
++    if (quote != '`' && (lexer->lookahead == '\n' || lexer->lookahead == '\r')) {
++      return false;
++    }
++    if (quote == '`' && lexer->lookahead == '$') {
++      lexer->advance(lexer, false);
++      if (lexer->lookahead == '{' && !scan_to_end_of_object(lexer)) return false;
++      continue;
++    }
++    lexer->advance(lexer, false);
++  }
++  return false;
++}
++
+ // If the current lookahead position is a known opening delimiter, scans
+ // through to the balanced closing delimiter. Returns `true` if it has done so
+ // successfully, or if there was no opening delimiter at the current position.
+@@ -225,7 +260,9 @@
+ // functions without looping infinitely. When we don't want to ignore any
+ // characters, we can pass a null character.
+ static bool handle_delimiters(TSLexer *lexer, const char excluded_character) {
+-  if (lexer->lookahead == '{' && lexer->lookahead != excluded_character) {
++  if (lexer->lookahead == '\'' || lexer->lookahead == '"' || lexer->lookahead == '`') {
++    return scan_quoted_string(lexer);
++  } else if (lexer->lookahead == '{' && lexer->lookahead != excluded_character) {
+     return scan_to_end_of_object(lexer);
+   } else if (lexer->lookahead == '[' && lexer->lookahead != excluded_character) {
+     return scan_to_end_of_array(lexer);
+@@ -460,7 +497,11 @@
+         return false;
+       }
+ 
+-      if (lexer->lookahead == '{') {
++      if (lexer->lookahead == '\'' || lexer->lookahead == '"' || lexer->lookahead == '`') {
++        if (!scan_quoted_string(lexer)) return false;
++        lexer->mark_end(lexer);
++        continue;
++      } else if (lexer->lookahead == '{') {
+         PRINTF("Encountered an opening brace at col %i; new depth will be %i\n", lexer->get_column(lexer), depth + 1);
+         lexer->advance(lexer, false);
+         depth++;

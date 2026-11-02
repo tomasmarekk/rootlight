@@ -1,0 +1,30 @@
+# Local static binding for retained Vento parser and scanner sources.
+# Source acquisition and grammar generation remain outside compilation.
+[package]
+name = "tree-sitter-vento"
+version = "0.21.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/ventojs/tree-sitter-vento"
+description = "Pinned Vento grammar with a local static language binding"
+publish = false
+build = "bindings/rust/build.rs"
+
+[workspace]
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"
+
+[dev-dependencies]
+tree-sitter = { version = "=0.26.11", default-features = false, features = ["std"] }
+
+[[test]]
+name = "vento_syntax"
+path = "../../tests/native-grammars/tests/vento_syntax.rs"

@@ -1,4 +1,8 @@
 * text=auto eol=lf
+# Vento's retained native sources, original Git archive and fixture remain byte-exact.
+/third_party/tree-sitter-vento-0.21.0/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+/tests/native-grammars/fixtures/vento/** -text
+/tests/native-grammars/fixtures/vento/badly_formatted.vto whitespace=-blank-at-eof
 # Original GYP fixtures and licenses retain their authenticated physical bytes.
 /crates/rootlight-adapter-treesitter/tests/fixtures/gyp/** -text
 *.png binary
