@@ -1,0 +1,1558 @@
+[
+  {
+    "type": "class_definition",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "backtick_string",
+          "named": true
+        },
+        {
+          "type": "data_declaration",
+          "named": true
+        },
+        {
+          "type": "empty_statement",
+          "named": true
+        },
+        {
+          "type": "field_symbol",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "inline_data_statement",
+          "named": true
+        },
+        {
+          "type": "macro_parameter",
+          "named": true
+        },
+        {
+          "type": "methods_declaration",
+          "named": true
+        },
+        {
+          "type": "number",
+          "named": true
+        },
+        {
+          "type": "operator",
+          "named": true
+        },
+        {
+          "type": "parenthesized_group",
+          "named": true
+        },
+        {
+          "type": "section_declaration",
+          "named": true
+        },
+        {
+          "type": "statement",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "string_template",
+          "named": true
+        },
+        {
+          "type": "text_symbol_key",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "class_forward_declaration",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "backtick_string",
+          "named": true
+        },
+        {
+          "type": "field_symbol",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "macro_parameter",
+          "named": true
+        },
+        {
+          "type": "number",
+          "named": true
+        },
+        {
+          "type": "operator",
+          "named": true
+        },
+        {
+          "type": "parenthesized_group",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "string_template",
+          "named": true
+        },
+        {
+          "type": "text_symbol_key",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "class_implementation",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "data_declaration",
+          "named": true
+        },
+        {
+          "type": "empty_statement",
+          "named": true
+        },
+        {
+          "type": "inline_data_statement",
+          "named": true
+        },
+        {
+          "type": "method_implementation",
+          "named": true
+        },
+        {
+          "type": "methods_declaration",
+          "named": true
+        },
+        {
+          "type": "statement",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "data_declaration",
+    "named": true,
+    "fields": {
+      "kind": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "class-data",
+            "named": false
+          },
+          {
+            "type": "constants",
+            "named": false
+          },
+          {
+            "type": "data",
+            "named": false
+          },
+          {
+            "type": "field-symbols",
+            "named": false
+          },
+          {
+            "type": "nodes",
+            "named": false
+          },
+          {
+            "type": "parameters",
+            "named": false
+          },
+          {
+            "type": "ranges",
+            "named": false
+          },
+          {
+            "type": "select-options",
+            "named": false
+          },
+          {
+            "type": "statics",
+            "named": false
+          },
+          {
+            "type": "tables",
+            "named": false
+          },
+          {
+            "type": "types",
+            "named": false
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "declaration_entry",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "declaration_entry",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "field_symbol",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "backtick_string",
+          "named": true
+        },
+        {
+          "type": "field_symbol",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "macro_parameter",
+          "named": true
+        },
+        {
+          "type": "number",
+          "named": true
+        },
+        {
+          "type": "operator",
+          "named": true
+        },
+        {
+          "type": "parenthesized_group",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "string_template",
+          "named": true
+        },
+        {
+          "type": "text_symbol_key",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "empty_statement",
+    "named": true,
+    "fields": {}
+  },
+  {
+    "type": "form_definition",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "backtick_string",
+          "named": true
+        },
+        {
+          "type": "data_declaration",
+          "named": true
+        },
+        {
+          "type": "empty_statement",
+          "named": true
+        },
+        {
+          "type": "field_symbol",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "inline_data_statement",
+          "named": true
+        },
+        {
+          "type": "macro_parameter",
+          "named": true
+        },
+        {
+          "type": "methods_declaration",
+          "named": true
+        },
+        {
+          "type": "number",
+          "named": true
+        },
+        {
+          "type": "operator",
+          "named": true
+        },
+        {
+          "type": "parenthesized_group",
+          "named": true
+        },
+        {
+          "type": "statement",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "string_template",
+          "named": true
+        },
+        {
+          "type": "text_symbol_key",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "function_definition",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "backtick_string",
+          "named": true
+        },
+        {
+          "type": "data_declaration",
+          "named": true
+        },
+        {
+          "type": "empty_statement",
+          "named": true
+        },
+        {
+          "type": "field_symbol",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "inline_data_statement",
+          "named": true
+        },
+        {
+          "type": "macro_parameter",
+          "named": true
+        },
+        {
+          "type": "methods_declaration",
+          "named": true
+        },
+        {
+          "type": "number",
+          "named": true
+        },
+        {
+          "type": "operator",
+          "named": true
+        },
+        {
+          "type": "parenthesized_group",
+          "named": true
+        },
+        {
+          "type": "statement",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "string_template",
+          "named": true
+        },
+        {
+          "type": "text_symbol_key",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "inline_data_statement",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "backtick_string",
+          "named": true
+        },
+        {
+          "type": "field_symbol",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "macro_parameter",
+          "named": true
+        },
+        {
+          "type": "number",
+          "named": true
+        },
+        {
+          "type": "operator",
+          "named": true
+        },
+        {
+          "type": "parenthesized_group",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "string_template",
+          "named": true
+        },
+        {
+          "type": "text_symbol_key",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "interface_definition",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "backtick_string",
+          "named": true
+        },
+        {
+          "type": "data_declaration",
+          "named": true
+        },
+        {
+          "type": "empty_statement",
+          "named": true
+        },
+        {
+          "type": "field_symbol",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "inline_data_statement",
+          "named": true
+        },
+        {
+          "type": "macro_parameter",
+          "named": true
+        },
+        {
+          "type": "methods_declaration",
+          "named": true
+        },
+        {
+          "type": "number",
+          "named": true
+        },
+        {
+          "type": "operator",
+          "named": true
+        },
+        {
+          "type": "parenthesized_group",
+          "named": true
+        },
+        {
+          "type": "statement",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "string_template",
+          "named": true
+        },
+        {
+          "type": "text_symbol_key",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "interface_forward_declaration",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "backtick_string",
+          "named": true
+        },
+        {
+          "type": "field_symbol",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "macro_parameter",
+          "named": true
+        },
+        {
+          "type": "number",
+          "named": true
+        },
+        {
+          "type": "operator",
+          "named": true
+        },
+        {
+          "type": "parenthesized_group",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "string_template",
+          "named": true
+        },
+        {
+          "type": "text_symbol_key",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "method_entry",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": true,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "~",
+            "named": false
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "backtick_string",
+          "named": true
+        },
+        {
+          "type": "field_symbol",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "macro_parameter",
+          "named": true
+        },
+        {
+          "type": "number",
+          "named": true
+        },
+        {
+          "type": "operator",
+          "named": true
+        },
+        {
+          "type": "parenthesized_group",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "string_template",
+          "named": true
+        },
+        {
+          "type": "text_symbol_key",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "method_implementation",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": true,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "~",
+            "named": false
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "backtick_string",
+          "named": true
+        },
+        {
+          "type": "data_declaration",
+          "named": true
+        },
+        {
+          "type": "empty_statement",
+          "named": true
+        },
+        {
+          "type": "field_symbol",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "inline_data_statement",
+          "named": true
+        },
+        {
+          "type": "macro_parameter",
+          "named": true
+        },
+        {
+          "type": "methods_declaration",
+          "named": true
+        },
+        {
+          "type": "number",
+          "named": true
+        },
+        {
+          "type": "operator",
+          "named": true
+        },
+        {
+          "type": "parenthesized_group",
+          "named": true
+        },
+        {
+          "type": "statement",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "string_template",
+          "named": true
+        },
+        {
+          "type": "text_symbol_key",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "methods_declaration",
+    "named": true,
+    "fields": {
+      "kind": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "class-methods",
+            "named": false
+          },
+          {
+            "type": "methods",
+            "named": false
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "method_entry",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "module_definition",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "backtick_string",
+          "named": true
+        },
+        {
+          "type": "data_declaration",
+          "named": true
+        },
+        {
+          "type": "empty_statement",
+          "named": true
+        },
+        {
+          "type": "field_symbol",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "inline_data_statement",
+          "named": true
+        },
+        {
+          "type": "macro_parameter",
+          "named": true
+        },
+        {
+          "type": "methods_declaration",
+          "named": true
+        },
+        {
+          "type": "number",
+          "named": true
+        },
+        {
+          "type": "operator",
+          "named": true
+        },
+        {
+          "type": "parenthesized_group",
+          "named": true
+        },
+        {
+          "type": "statement",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "string_template",
+          "named": true
+        },
+        {
+          "type": "text_symbol_key",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "parenthesized_group",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "backtick_string",
+          "named": true
+        },
+        {
+          "type": "field_symbol",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "macro_parameter",
+          "named": true
+        },
+        {
+          "type": "number",
+          "named": true
+        },
+        {
+          "type": "operator",
+          "named": true
+        },
+        {
+          "type": "parenthesized_group",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "string_template",
+          "named": true
+        },
+        {
+          "type": "text_symbol_key",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "program_statement",
+    "named": true,
+    "fields": {
+      "kind": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "function-pool",
+            "named": false
+          },
+          {
+            "type": "program",
+            "named": false
+          },
+          {
+            "type": "report",
+            "named": false
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "backtick_string",
+          "named": true
+        },
+        {
+          "type": "field_symbol",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "macro_parameter",
+          "named": true
+        },
+        {
+          "type": "number",
+          "named": true
+        },
+        {
+          "type": "operator",
+          "named": true
+        },
+        {
+          "type": "parenthesized_group",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "string_template",
+          "named": true
+        },
+        {
+          "type": "text_symbol_key",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "section_declaration",
+    "named": true,
+    "fields": {
+      "visibility": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "private",
+            "named": false
+          },
+          {
+            "type": "protected",
+            "named": false
+          },
+          {
+            "type": "public",
+            "named": false
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "source_file",
+    "named": true,
+    "root": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "class_definition",
+          "named": true
+        },
+        {
+          "type": "class_forward_declaration",
+          "named": true
+        },
+        {
+          "type": "class_implementation",
+          "named": true
+        },
+        {
+          "type": "data_declaration",
+          "named": true
+        },
+        {
+          "type": "empty_statement",
+          "named": true
+        },
+        {
+          "type": "form_definition",
+          "named": true
+        },
+        {
+          "type": "function_definition",
+          "named": true
+        },
+        {
+          "type": "inline_data_statement",
+          "named": true
+        },
+        {
+          "type": "interface_definition",
+          "named": true
+        },
+        {
+          "type": "interface_forward_declaration",
+          "named": true
+        },
+        {
+          "type": "methods_declaration",
+          "named": true
+        },
+        {
+          "type": "module_definition",
+          "named": true
+        },
+        {
+          "type": "program_statement",
+          "named": true
+        },
+        {
+          "type": "statement",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "statement",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "backtick_string",
+          "named": true
+        },
+        {
+          "type": "field_symbol",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "macro_parameter",
+          "named": true
+        },
+        {
+          "type": "number",
+          "named": true
+        },
+        {
+          "type": "operator",
+          "named": true
+        },
+        {
+          "type": "parenthesized_group",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "string_template",
+          "named": true
+        },
+        {
+          "type": "text_symbol_key",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "string_template",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "template_substitution",
+          "named": true
+        },
+        {
+          "type": "template_text",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "template_substitution",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "backtick_string",
+          "named": true
+        },
+        {
+          "type": "field_symbol",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "macro_parameter",
+          "named": true
+        },
+        {
+          "type": "number",
+          "named": true
+        },
+        {
+          "type": "operator",
+          "named": true
+        },
+        {
+          "type": "parenthesized_group",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "string_template",
+          "named": true
+        },
+        {
+          "type": "text_symbol_key",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "(",
+    "named": false
+  },
+  {
+    "type": ")",
+    "named": false
+  },
+  {
+    "type": ",",
+    "named": false
+  },
+  {
+    "type": ".",
+    "named": false
+  },
+  {
+    "type": ":",
+    "named": false
+  },
+  {
+    "type": "[",
+    "named": false
+  },
+  {
+    "type": "]",
+    "named": false
+  },
+  {
+    "type": "backtick_string",
+    "named": true
+  },
+  {
+    "type": "class",
+    "named": false
+  },
+  {
+    "type": "class-data",
+    "named": false
+  },
+  {
+    "type": "class-methods",
+    "named": false
+  },
+  {
+    "type": "constants",
+    "named": false
+  },
+  {
+    "type": "data",
+    "named": false
+  },
+  {
+    "type": "deferred",
+    "named": false
+  },
+  {
+    "type": "definition",
+    "named": false
+  },
+  {
+    "type": "endclass",
+    "named": false
+  },
+  {
+    "type": "endform",
+    "named": false
+  },
+  {
+    "type": "endfunction",
+    "named": false
+  },
+  {
+    "type": "endinterface",
+    "named": false
+  },
+  {
+    "type": "endmethod",
+    "named": false
+  },
+  {
+    "type": "endmodule",
+    "named": false
+  },
+  {
+    "type": "field-symbols",
+    "named": false
+  },
+  {
+    "type": "field_symbol",
+    "named": true
+  },
+  {
+    "type": "final",
+    "named": false
+  },
+  {
+    "type": "form",
+    "named": false
+  },
+  {
+    "type": "friends",
+    "named": false
+  },
+  {
+    "type": "function",
+    "named": false
+  },
+  {
+    "type": "function-pool",
+    "named": false
+  },
+  {
+    "type": "identifier",
+    "named": true
+  },
+  {
+    "type": "implementation",
+    "named": false
+  },
+  {
+    "type": "interface",
+    "named": false
+  },
+  {
+    "type": "line_comment",
+    "named": true,
+    "extra": true
+  },
+  {
+    "type": "local",
+    "named": false
+  },
+  {
+    "type": "macro_parameter",
+    "named": true
+  },
+  {
+    "type": "method",
+    "named": false
+  },
+  {
+    "type": "methods",
+    "named": false
+  },
+  {
+    "type": "module",
+    "named": false
+  },
+  {
+    "type": "nodes",
+    "named": false
+  },
+  {
+    "type": "number",
+    "named": true
+  },
+  {
+    "type": "operator",
+    "named": true
+  },
+  {
+    "type": "parameters",
+    "named": false
+  },
+  {
+    "type": "pragma",
+    "named": true,
+    "extra": true
+  },
+  {
+    "type": "private",
+    "named": false
+  },
+  {
+    "type": "program",
+    "named": false
+  },
+  {
+    "type": "protected",
+    "named": false
+  },
+  {
+    "type": "public",
+    "named": false
+  },
+  {
+    "type": "ranges",
+    "named": false
+  },
+  {
+    "type": "report",
+    "named": false
+  },
+  {
+    "type": "section",
+    "named": false
+  },
+  {
+    "type": "select-options",
+    "named": false
+  },
+  {
+    "type": "star_comment",
+    "named": true,
+    "extra": true
+  },
+  {
+    "type": "statics",
+    "named": false
+  },
+  {
+    "type": "string",
+    "named": true
+  },
+  {
+    "type": "tables",
+    "named": false
+  },
+  {
+    "type": "template_text",
+    "named": true
+  },
+  {
+    "type": "text_symbol_key",
+    "named": true
+  },
+  {
+    "type": "types",
+    "named": false
+  },
+  {
+    "type": "{",
+    "named": false
+  },
+  {
+    "type": "|",
+    "named": false
+  },
+  {
+    "type": "}",
+    "named": false
+  },
+  {
+    "type": "~",
+    "named": false
+  }
+]

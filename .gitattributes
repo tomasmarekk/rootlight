@@ -422,3 +422,6 @@ third_party/tree-sitter-idris-0.0.1/** -text
 /third_party/tree-sitter-turtle-0.2.0/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
 /third_party/tree-sitter-turtle-0.2.0/upstream/*.tar.gz binary
 /crates/rootlight-service/src/tests/fixtures/cpp_include_resolution/** -text whitespace=cr-at-eol
+# Retained ABAP grammar inputs, archive and original fixture remain byte-exact.
+/third_party/tree-sitter-abap-0.1.0/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+/tests/native-grammars/fixtures/abap/** -text

@@ -51,6 +51,7 @@ members = [
     "xtask",
 ]
 exclude = [
+    "third_party/tree-sitter-abap-0.1.0",
     "third_party/tree-sitter-vento-0.21.0",
     "native-grammars/dql",
     "native-grammars/nquads",

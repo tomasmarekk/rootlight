@@ -1,0 +1,30 @@
+# Local static binding for retained ABAP structure parser and scanner sources.
+# Source acquisition and grammar generation remain outside compilation.
+[package]
+name = "tree-sitter-abap"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/zooloo303/tree-sitter-abap"
+description = "Pinned ABAP structure grammar with a local static binding"
+publish = false
+build = "bindings/rust/build.rs"
+
+[workspace]
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"
+
+[dev-dependencies]
+tree-sitter = { version = "=0.26.11", default-features = false, features = ["std"] }
+
+[[test]]
+name = "abap_syntax"
+path = "../../tests/native-grammars/tests/abap_syntax.rs"
