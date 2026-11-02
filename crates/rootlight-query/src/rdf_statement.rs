@@ -529,6 +529,7 @@ fn checked_file<R: GenerationReader>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{DqlQueryReadError, DqlQueryReadRequest, read_dql_query_page};
     use rootlight_cancel::{Cancellation, CancellationReason};
     use rootlight_ids::{GenerationIdentity, content_hash, derive_generation};
     use rootlight_ir::{
@@ -1236,6 +1237,184 @@ mod tests {
             ),
             Err(RdfStatementReadError::InvalidRecord)
         ));
+        assert_eq!(reader.pages.load(Ordering::Relaxed), 0);
+    }
+
+    fn dql_fixture() -> Reader {
+        use rootlight_ir::{DqlCallKind, DqlLiteralKind, DqlNode, DqlNodeKind, DqlQuery};
+        let mut reader = fixture();
+        let text = "{q(func:uid(1)){name}}";
+        reader.file.language = "dql".to_owned();
+        reader.file.content_hash = content_hash(text.as_bytes());
+        reader.file.byte_length = u64::try_from(text.len()).unwrap();
+        let span = |start, end| SourceSpan::new(reader.file.id, start, end).unwrap();
+        let source = SourceRef::new(
+            reader.metadata.repository(),
+            reader.metadata.generation(),
+            span(0, reader.file.byte_length),
+            reader.file.content_hash,
+            None,
+        );
+        reader.file.evidence.source = Some(source.clone());
+        let nodes = [
+            (0, 22, None, DqlNodeKind::Operation, None),
+            (
+                1,
+                21,
+                Some(0),
+                DqlNodeKind::Root { aggregation: false },
+                Some(span(1, 2)),
+            ),
+            (
+                8,
+                14,
+                Some(1),
+                DqlNodeKind::Call {
+                    class: DqlCallKind::Generator,
+                },
+                Some(span(8, 11)),
+            ),
+            (
+                12,
+                13,
+                Some(2),
+                DqlNodeKind::Literal {
+                    class: DqlLiteralKind::Number,
+                },
+                None,
+            ),
+            (16, 20, Some(1), DqlNodeKind::Selection, None),
+            (
+                16,
+                20,
+                Some(4),
+                DqlNodeKind::Predicate { reverse: false },
+                Some(span(16, 20)),
+            ),
+        ]
+        .into_iter()
+        .map(|(start, end, parent, role, name)| DqlNode {
+            span: span(start, end),
+            parent,
+            role,
+            name,
+        })
+        .collect();
+        let query = DqlQuery::from_evidence(source, text, nodes).unwrap();
+        reader.extensions =
+            vec![rootlight_ir::new_dql_query_envelope(reader.provenance.id, &query).unwrap()];
+        reader
+    }
+
+    fn dql_request(reader: &Reader) -> DqlQueryReadRequest {
+        DqlQueryReadRequest::new(
+            reader.metadata.repository(),
+            reader.metadata.generation(),
+            reader.file.id,
+            GenerationReadLimit::default(),
+        )
+    }
+
+    #[test]
+    fn dql_wrong_language_and_unsupported_index_never_fall_back_to_global_reads() {
+        let mut reader = dql_fixture();
+        reader.file.language = "json".to_owned();
+        let token = Cancellation::new();
+        let context = GenerationContext::new(&token, GenerationBudget::default());
+        assert!(matches!(
+            read_dql_query_page(
+                &reader,
+                dql_request(&reader),
+                &context,
+                QueryBudget::default()
+            ),
+            Err(DqlQueryReadError::InvalidFile)
+        ));
+        assert_eq!(reader.file_pages.load(Ordering::Relaxed), 0);
+        reader.file.language = "dql".to_owned();
+        reader.supports_file_index = false;
+        assert!(matches!(
+            read_dql_query_page(
+                &reader,
+                dql_request(&reader),
+                &context,
+                QueryBudget::default()
+            ),
+            Err(DqlQueryReadError::IndexedFileReadUnsupported)
+        ));
+        assert_eq!(reader.file_pages.load(Ordering::Relaxed), 1);
+        assert_eq!(reader.pages.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn dql_canonical_envelopes_still_require_retained_provenance_identity() {
+        let token = Cancellation::new();
+        let context = GenerationContext::new(&token, GenerationBudget::default());
+        let reader = dql_fixture();
+        let page = read_dql_query_page(
+            &reader,
+            dql_request(&reader),
+            &context,
+            QueryBudget::default(),
+        )
+        .unwrap();
+        assert_eq!(page.queries().len(), 1);
+        assert_eq!(page.queries()[0].query().text(), "{q(func:uid(1)){name}}");
+        for fault in [
+            "payload",
+            "version",
+            "id",
+            "missing_provenance",
+            "foreign_provenance",
+        ] {
+            let mut reader = dql_fixture();
+            match fault {
+                "payload" => reader.extensions[0].payload.push(' '),
+                "version" => reader.extensions[0].version = "2".to_owned(),
+                "id" => reader.extensions[0].id = FactId::from_bytes([99; 20]),
+                "missing_provenance" => reader.provenance.id = FactId::from_bytes([98; 20]),
+                _ => reader.provenance.generation = GenerationId::from_bytes([97; 20]),
+            }
+            assert!(
+                matches!(
+                    read_dql_query_page(
+                        &reader,
+                        dql_request(&reader),
+                        &context,
+                        QueryBudget::default()
+                    ),
+                    Err(DqlQueryReadError::InvalidRecord)
+                ),
+                "{fault}"
+            );
+            assert_eq!(reader.pages.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn dql_query_budgets_refuse_actual_work_and_output_without_partial_success() {
+        let reader = dql_fixture();
+        let token = Cancellation::new();
+        let context = GenerationContext::new(&token, GenerationBudget::default());
+        for (budget, resource) in [
+            (QueryBudget::default().with_max_rows(1), QueryResource::Rows),
+            (
+                QueryBudget::default().with_max_source_bytes(1),
+                QueryResource::SourceBytes,
+            ),
+            (
+                QueryBudget::default().with_max_json_bytes(1),
+                QueryResource::JsonBytes,
+            ),
+        ] {
+            match read_dql_query_page(&reader, dql_request(&reader), &context, budget) {
+                Err(DqlQueryReadError::Query(QueryError::BudgetExceeded {
+                    resource: actual,
+                    ..
+                })) => assert_eq!(actual, resource),
+                result => panic!("unexpected DQL resource result for {resource:?}: {result:?}"),
+            }
+        }
         assert_eq!(reader.pages.load(Ordering::Relaxed), 0);
     }
 }

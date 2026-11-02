@@ -27421,6 +27421,7 @@ mod tests {
     mod cpp_include_resolution;
     mod cpp_preprocessor;
     mod dockerfile_source_preservation;
+    mod dql_discovery;
     mod eiffel_text_reopen;
     mod elm_module_ownership;
     mod encoded_bom_source_preservation;

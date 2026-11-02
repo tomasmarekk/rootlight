@@ -2140,6 +2140,16 @@ fn verify_snapshot_identities(
                     .check()
                     .map_err(IdentityVerificationError::Control)?;
             }
+            rootlight_ir::DQL_QUERY_NAMESPACE => {
+                rootlight_ir::decode_dql_query_envelope(envelope).map_err(|_| {
+                    IdentityVerificationError::IdentityMismatch(
+                        IdentityMismatchComponent::ClaimEnvelope,
+                    )
+                })?;
+                context
+                    .check()
+                    .map_err(IdentityVerificationError::Control)?;
+            }
             rootlight_ir::RDF_STATEMENT_NAMESPACE => {
                 rootlight_ir::decode_rdf_statement_envelope(envelope).map_err(|_| {
                     IdentityVerificationError::IdentityMismatch(
@@ -4496,6 +4506,136 @@ mod tests {
             ),
             Err(IdentityVerificationError::ManifestMismatch)
         );
+    }
+
+    #[test]
+    fn dql_query_identity_is_verified_before_snapshot_admission() {
+        let text = "{q(func:uid(1)){name}}";
+        let (metadata, mut document, catalog) =
+            file_only_generation_with_anchor(true, text.as_bytes());
+        document.files[0].language = "dql".to_owned();
+        let file = &document.files[0];
+        let span = |start, end| SourceSpan::new(file.id, start, end).unwrap();
+        use rootlight_ir::{DqlCallKind, DqlLiteralKind, DqlNode, DqlNodeKind};
+        let nodes = [
+            (0, 22, None, DqlNodeKind::Operation, None),
+            (
+                1,
+                21,
+                Some(0),
+                DqlNodeKind::Root { aggregation: false },
+                Some(span(1, 2)),
+            ),
+            (
+                8,
+                14,
+                Some(1),
+                DqlNodeKind::Call {
+                    class: DqlCallKind::Generator,
+                },
+                Some(span(8, 11)),
+            ),
+            (
+                12,
+                13,
+                Some(2),
+                DqlNodeKind::Literal {
+                    class: DqlLiteralKind::Number,
+                },
+                None,
+            ),
+            (16, 20, Some(1), DqlNodeKind::Selection, None),
+            (
+                16,
+                20,
+                Some(4),
+                DqlNodeKind::Predicate { reverse: false },
+                Some(span(16, 20)),
+            ),
+        ]
+        .into_iter()
+        .map(|(start, end, parent, role, name)| DqlNode {
+            span: span(start, end),
+            parent,
+            role,
+            name,
+        })
+        .collect();
+        let query = rootlight_ir::DqlQuery::from_evidence(
+            file.evidence.source.clone().unwrap(),
+            text,
+            nodes,
+        )
+        .unwrap();
+        let envelope = rootlight_ir::new_dql_query_envelope(file.provenance, &query).unwrap();
+        document.extensions.push(envelope.clone());
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let verified = IdentityVerifiedGeneration::verify_with_source_files(
+            metadata,
+            document.clone(),
+            catalog.clone(),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            &context,
+        )
+        .unwrap();
+        assert!(verified.document().extensions.contains(&envelope));
+        assert_eq!(
+            IdentityVerifiedGeneration::verify_snapshot(verified.snapshot().clone(), &context)
+                .unwrap(),
+            verified
+        );
+        for fault in [
+            "noncanonical",
+            "version",
+            "identity",
+            "rehash_foreign_source_text",
+        ] {
+            let mut changed = document.clone();
+            let item = changed
+                .extensions
+                .iter_mut()
+                .find(|item| item.id == envelope.id)
+                .unwrap();
+            match fault {
+                "noncanonical" => item.payload.push(' '),
+                "version" => item.version = "2".to_owned(),
+                "identity" => item.id = FactId::from_bytes([99; 20]),
+                _ => {
+                    item.payload = item.payload.replacen("uid(1)", "uid(2)", 1);
+                    assert_ne!(item.payload, envelope.payload);
+                    let identity = serde_json::to_vec(&(
+                        rootlight_ir::DQL_QUERY_NAMESPACE,
+                        "1",
+                        item.repository,
+                        item.generation,
+                        item.provenance,
+                        item.evidence.source.as_ref().unwrap(),
+                        &item.payload,
+                        &item.evidence.derivation,
+                    ))
+                    .unwrap();
+                    item.id = rootlight_ids::derive_fact("rootlight.dql_query/v1", &identity).id();
+                }
+            }
+            assert!(
+                matches!(
+                    IdentityVerifiedGeneration::verify_with_source_files(
+                        metadata,
+                        changed,
+                        catalog.clone(),
+                        &IrLimits::default(),
+                        &ExtensionSupport::default(),
+                        &context
+                    ),
+                    Err(IdentityVerificationError::IdentityMismatch(
+                        IdentityMismatchComponent::ClaimEnvelope
+                    ) | IdentityVerificationError::InvalidGeneration)
+                ),
+                "{fault}"
+            );
+        }
     }
 
     #[test]

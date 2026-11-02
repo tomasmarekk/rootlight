@@ -1,5 +1,5 @@
 //! Reads selected normalized facts directly from a sealed generation oracle.
-//! Stable-ID graph reads and bounded typed RDF file reads preserve source evidence.
+//! Stable-ID graph reads and bounded typed RDF/DQL reads preserve source evidence.
 //! `--rdf-page-size N [--rdf-after FACT_ID]` selects one RDF page without graph reads.
 //! This diagnostic bypasses lexical projection; it does not index sources or
 //! prove whole-language completeness.
@@ -20,8 +20,8 @@ use rootlight_ir::{
     RelationRecord, SourceRef,
 };
 use rootlight_query::{
-    QueryBudget, RdfStatementPage, RdfStatementReadError, RdfStatementReadRequest,
-    read_rdf_statement_page,
+    DqlQueryPage, DqlQueryReadError, DqlQueryReadRequest, QueryBudget, RdfStatementPage,
+    RdfStatementReadError, RdfStatementReadRequest, read_dql_query_page, read_rdf_statement_page,
 };
 use rootlight_storage::{
     GenerationBudget, GenerationContext, GenerationMetadata, GenerationReadLimit, GenerationReader,
@@ -41,6 +41,8 @@ const MAX_RELATIONS: usize = 32_768;
 const MAX_PROVENANCE: usize = 32_768;
 const MAX_RDF_STATEMENTS: usize = 16_384;
 const MAX_RDF_EXTENSIONS: usize = 32_768;
+const MAX_DQL_QUERIES: usize = 16_384;
+const MAX_DQL_EXTENSIONS: usize = 32_768;
 const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RDF_PAGE_SIZE: u32 = 256;
 
@@ -233,6 +235,23 @@ struct RdfStatementOmission {
 }
 
 #[derive(Serialize)]
+struct DqlQueryRead {
+    file: FileId,
+    page_size: u16,
+    total_file_extensions: u64,
+    scanned_file_extensions: u64,
+    returned_queries: u64,
+    pages: Vec<DqlQueryPage>,
+    complete: bool,
+}
+
+#[derive(Serialize)]
+struct DqlQueryOmission {
+    file: FileId,
+    reason: &'static str,
+}
+
+#[derive(Serialize)]
 struct Report {
     schema: &'static str,
     metadata: Value,
@@ -251,6 +270,10 @@ struct Report {
     rdf_statement_reads: Vec<RdfStatementRead>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     rdf_statement_omissions: Vec<RdfStatementOmission>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    dql_query_reads: Vec<DqlQueryRead>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    dql_query_omissions: Vec<DqlQueryOmission>,
     counts: Value,
     diagnostic_limits: Value,
     qualification: Value,
@@ -547,6 +570,89 @@ impl Inspection<'_, '_> {
             request = request.with_after(cursor.ok_or("RDF cursor missing")?);
         }
     }
+
+    fn dql_queries(&mut self, file: FileId) -> DiagnosticResult<Option<DqlQueryRead>> {
+        let limit = GenerationReadLimit::default();
+        let mut request = DqlQueryReadRequest::new(
+            self.metadata.repository(),
+            self.metadata.generation(),
+            file,
+            limit,
+        );
+        let mut total = None;
+        let mut scanned = 0u64;
+        let mut returned = 0u64;
+        let mut after = None;
+        let mut pages = Vec::new();
+        loop {
+            self.context.check()?;
+            let page = match read_dql_query_page(
+                self.reader,
+                request,
+                &self.context,
+                QueryBudget::default(),
+            ) {
+                Ok(page) => page,
+                Err(DqlQueryReadError::IndexedFileReadUnsupported) if pages.is_empty() => {
+                    return Ok(None);
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if page.scope() != "file_extensions"
+                || page.total_extensions() > u64::try_from(MAX_DQL_EXTENSIONS)?
+                || total.is_some_and(|old| old != page.total_extensions())
+            {
+                return Err("DQL indexed page total or scope is inconsistent".into());
+            }
+            total = Some(page.total_extensions());
+            scanned = scanned
+                .checked_add(page.scanned_extensions())
+                .ok_or("DQL scanned count overflow")?;
+            returned = returned
+                .checked_add(u64::try_from(page.queries().len())?)
+                .ok_or("DQL query count overflow")?;
+            if returned > u64::try_from(MAX_DQL_QUERIES)? || scanned > page.total_extensions() {
+                return Err("DQL diagnostic bound or page total exceeded".into());
+            }
+            for record in page.queries() {
+                let query = record.query();
+                self.source(query.source())?;
+                for index in 0..query.nodes().len() {
+                    self.source(&query.node_source(index).ok_or("DQL node source missing")?)?;
+                }
+                self.provenance_ids.insert(record.provenance());
+            }
+            let complete = page.range_complete();
+            let cursor = page.next_cursor();
+            if complete {
+                if cursor.is_some() || scanned != page.total_extensions() {
+                    return Err("DQL complete pages did not conserve the file total".into());
+                }
+            } else if page.scanned_extensions() == 0
+                || scanned >= page.total_extensions()
+                || cursor.is_none()
+                || after.is_some_and(|previous| cursor.is_some_and(|cursor| cursor <= previous))
+            {
+                return Err("DQL indexed continuation did not advance".into());
+            }
+            self.charge(&page)?;
+            pages.try_reserve(1)?;
+            pages.push(page);
+            if complete {
+                return Ok(Some(DqlQueryRead {
+                    file,
+                    page_size: limit.get(),
+                    total_file_extensions: total.ok_or("DQL total missing")?,
+                    scanned_file_extensions: scanned,
+                    returned_queries: returned,
+                    pages,
+                    complete,
+                }));
+            }
+            after = cursor;
+            request = request.with_after(cursor.ok_or("DQL cursor missing")?);
+        }
+    }
 }
 
 fn inspect(
@@ -574,6 +680,8 @@ fn inspect(
     let mut occurrence_reads = Vec::new();
     let mut rdf_statement_reads = Vec::new();
     let mut rdf_statement_omissions = Vec::new();
+    let mut dql_query_reads = Vec::new();
+    let mut dql_query_omissions = Vec::new();
     for &file in &arguments.files {
         inspection.require_file(file)?;
         if arguments.rdf_page.is_some()
@@ -605,6 +713,21 @@ fn inspect(
                 rdf_statement_reads.push(read);
             } else {
                 rdf_statement_omissions.push(RdfStatementOmission {
+                    file,
+                    reason: "indexed_file_extensions_unsupported",
+                });
+            }
+        }
+        if inspection
+            .files
+            .get(&file)
+            .is_some_and(|file| file.language == "dql")
+        {
+            if let Some(read) = inspection.dql_queries(file)? {
+                dql_query_reads.try_reserve(1)?;
+                dql_query_reads.push(read);
+            } else {
+                dql_query_omissions.push(DqlQueryOmission {
                     file,
                     reason: "indexed_file_extensions_unsupported",
                 });
@@ -692,11 +815,17 @@ fn inspect(
         "relation_reads":relation_reads.len(),
         "rdf_statements":rdf_statement_reads.iter().map(|read|read.returned_statements).sum::<u64>(),
         "rdf_statement_reads":rdf_statement_reads.len(),
-        "rdf_statement_omissions":rdf_statement_omissions.len()
+        "rdf_statement_omissions":rdf_statement_omissions.len(),
+        "dql_queries":dql_query_reads.iter().map(|read|read.returned_queries).sum::<u64>(),
+        "dql_query_reads":dql_query_reads.len(),
+        "dql_query_omissions":dql_query_omissions.len()
     });
     let rdf_complete =
         rdf_statement_omissions.is_empty() && rdf_statement_reads.iter().all(|read| read.complete);
     let rdf_executed = !rdf_statement_reads.is_empty();
+    let dql_complete =
+        dql_query_omissions.is_empty() && dql_query_reads.iter().all(|read| read.complete);
+    let dql_executed = !dql_query_reads.is_empty();
     Ok(Report {
         schema: "rootlight-snapshot-facts-diagnostic/1",
         metadata: metadata_json(metadata),
@@ -713,17 +842,20 @@ fn inspect(
         relation_reads,
         rdf_statement_reads,
         rdf_statement_omissions,
+        dql_query_reads,
+        dql_query_omissions,
         counts,
         diagnostic_limits: json!({
             "selected_files":MAX_SELECTED_FILES,"selected_entities":MAX_SELECTED_ENTITIES,
             "witness_files":MAX_WITNESS_FILES,"occurrences":MAX_OCCURRENCES,
             "unique_relations":MAX_RELATIONS,"provenance":MAX_PROVENANCE,
             "rdf_statements":MAX_RDF_STATEMENTS,"rdf_file_extensions":MAX_RDF_EXTENSIONS,
+            "dql_queries":MAX_DQL_QUERIES,"dql_file_extensions":MAX_DQL_EXTENSIONS,
             "output_bytes":MAX_OUTPUT_BYTES,"deadline_seconds":null,
             "production_limits_changed":false
         }),
         qualification: json!({
-            "selected_reads_complete":rdf_complete,"metadata_unchanged":true,
+            "selected_reads_complete":rdf_complete && dql_complete,"metadata_unchanged":true,
             "selected_read_scope":if arguments.rdf_page.is_some() { "single_rdf_file_extension_page" } else { "selected_files_and_entities" },
             "graph_reads_executed":arguments.rdf_page.is_none(),
             "stable_id_cursor_and_count_conservation_checked":true,
@@ -733,6 +865,8 @@ fn inspect(
             "query_projection_executed":false,"sources_indexed":false,
             "typed_rdf_query_executed":rdf_executed,"rdf_statement_reads_complete":rdf_complete,
             "rdf_statement_scope":"selected_native_ntriples_nquads_or_nquads_dgraph_files_only",
+            "typed_dql_query_executed":dql_executed,"dql_query_reads_complete":dql_complete,
+            "dql_query_scope":"selected_native_dql_files_only",
             "source_code_executed":false,"public_queries_qualified":false,
             "installed_mcp_qualified":false,"full_semantic_completeness_proven":false
         }),
@@ -1284,6 +1418,100 @@ mod tests {
                 .get("datatype")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn configured_cold_dql_query_preserves_native_roles_and_serialized_sources() {
+        let text = include_str!("../../../native-grammars/dql/tests/fixtures/suite02.dql");
+        let configuration = "version='1.3'\n\
+[extensions.source-languages]\nversion='1.0'\ncritical=true\n\
+[extensions.source-languages.data.paths]\n'query.json'='dql'\n";
+        let (_directory, oracle, reader, file) =
+            sealed_rdf_fixture_with_configuration("query.json", text, Some(configuration));
+        let metadata = reader.metadata();
+        drop(reader);
+        let cancellation = Cancellation::new();
+        let reader = OracleReader::open_in(
+            &oracle,
+            &GenerationContext::new(&cancellation, GenerationBudget::default()),
+        )
+        .unwrap();
+        assert_eq!(reader.metadata(), metadata);
+        let report = inspect_rdf_fixture(&reader, &oracle, file, None);
+        assert_eq!(report.files.len(), 1);
+        assert_eq!(report.files[0].language, "dql");
+        assert!(report.entities.is_empty());
+        assert!(report.rdf_statement_reads.is_empty());
+        assert!(report.dql_query_omissions.is_empty());
+        let read = &report.dql_query_reads[0];
+        assert!(read.complete);
+        assert_eq!(read.returned_queries, 1);
+        assert_eq!(read.scanned_file_extensions, read.total_file_extensions);
+        assert_eq!(read.pages.len(), 1);
+        let page = &read.pages[0];
+        assert_eq!(page.total_matching_queries(), Some(1));
+        assert!(page.range_complete());
+        assert_eq!(page.next_cursor(), None);
+        let record = &page.queries()[0];
+        let query = record.query();
+        query.verify_source_text(text).unwrap();
+        assert_eq!(
+            query.source(),
+            report.files[0].evidence.source.as_ref().unwrap()
+        );
+        assert_eq!(query.text(), text);
+        use rootlight_ir::{DqlCallKind, DqlNodeKind};
+        let count = |role| {
+            query
+                .nodes()
+                .iter()
+                .filter(|node| node.role == role)
+                .count()
+        };
+        assert_eq!(count(DqlNodeKind::Root { aggregation: false }), 18);
+        assert_eq!(count(DqlNodeKind::Filter), 12);
+        assert_eq!(
+            count(DqlNodeKind::Call {
+                class: DqlCallKind::Count
+            }),
+            6
+        );
+        assert_eq!(count(DqlNodeKind::Predicate { reverse: true }), 6);
+        for index in 0..query.nodes().len() {
+            let source = query.node_source(index).unwrap();
+            assert_eq!(source.repository(), metadata.repository());
+            assert_eq!(source.generation(), metadata.generation());
+            assert_eq!(source.span().file(), file);
+            assert_eq!(
+                source.content_hash(),
+                rootlight_ids::content_hash(text.as_bytes())
+            );
+        }
+        assert!(
+            report
+                .provenance
+                .iter()
+                .any(|item| item.id == record.provenance())
+        );
+        assert_eq!(report.counts["dql_queries"], 1);
+        assert_eq!(report.qualification["typed_dql_query_executed"], true);
+        assert_eq!(report.qualification["typed_rdf_query_executed"], false);
+        assert_eq!(report.qualification["dql_query_reads_complete"], true);
+        assert_eq!(report.qualification["selected_reads_complete"], true);
+        assert_eq!(
+            report.qualification["full_semantic_completeness_proven"],
+            false
+        );
+        let encoded = serde_json::to_value(&report).unwrap();
+        let encoded_record = &encoded["dql_query_reads"][0]["pages"][0]["queries"][0];
+        assert_eq!(encoded_record["id"], json!(record.id()));
+        assert_eq!(encoded_record["query"]["source"], json!(query.source()));
+        assert_eq!(encoded_record["query"]["text"], text);
+        assert_eq!(
+            encoded_record["query"]["nodes"].as_array().unwrap().len(),
+            query.nodes().len()
+        );
+        assert_eq!(encoded_record["query"]["references"], json!([]));
     }
 
     #[test]

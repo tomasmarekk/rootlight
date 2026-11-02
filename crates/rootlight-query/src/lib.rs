@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod conditional_activity;
+mod dql_query;
 mod model;
 mod projection;
 mod rdf_statement;
@@ -18,6 +19,10 @@ mod store;
 pub use conditional_activity::{
     ConditionalActivityAssessment, ConditionalActivityBasis, ConditionalActivityInventory,
     ConditionalActivityReason, ConditionalActivityScope, ConditionalActivityState,
+};
+pub use dql_query::{
+    DqlQueryPage, DqlQueryReadError, DqlQueryReadRequest, DqlQueryReadUsage, DqlQueryRecord,
+    read_dql_query_page,
 };
 pub use model::{
     ADVANCED_DEFAULT_MAX_DEPTH, ADVANCED_DEFAULT_MAX_RESULTS, ADVANCED_MAX_DEPTH,
