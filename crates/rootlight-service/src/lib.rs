@@ -48,6 +48,7 @@ mod generation_admission;
 mod generation_admission_observation;
 #[cfg(test)]
 mod generation_text_observation;
+mod graphql_query_admission;
 #[cfg(test)]
 mod haskell_native_tests;
 #[cfg(test)]
@@ -1219,7 +1220,7 @@ const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-trunca
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/378";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/162";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
-const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/15";
+const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/16";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/6";
 const INCREMENTAL_UNIT_SEED: &str = "rootlight.first-slice.repository-unit";
 const INCREMENTAL_FILE_UNIT_SEED: &str = "rootlight.first-slice.file-unit";
@@ -10017,7 +10018,20 @@ impl FirstSliceService {
                 if matches!(admission, NativeFSharpAdmission::Accepted { .. }) {
                     language = Some("fsharp");
                 }
-                if let Some(route) = prepared_file_parser_route_hash(input, language, &admission)? {
+                let graphql_admission = if language.is_none() {
+                    graphql_query_admission::probe(
+                        self, repository, generation, input, &snapshot, cancellation,
+                    )?
+                } else {
+                    graphql_query_admission::Admission::NotAttempted
+                };
+                if matches!(graphql_admission, graphql_query_admission::Admission::Accepted { .. }) {
+                    language = Some("graphql");
+                }
+                let route = prepared_file_parser_route_hash(input, language, &admission)?;
+                if let Some(route) = graphql_query_admission::route_hash(
+                    input, language, graphql_admission, route,
+                )? {
                     parser_route_inputs.insert(input.file, route);
                 }
                 let Some(language) = language else {
@@ -10034,9 +10048,11 @@ impl FirstSliceService {
                             .unwrap_or("unknown")
                             .to_owned(),
                         // Containers have no direct text route even when their format is known.
-                        disposition: if matches!(admission, NativeFSharpAdmission::ResourceBounded) {
+                        disposition: if matches!(admission, NativeFSharpAdmission::ResourceBounded)
+                            || matches!(graphql_admission, graphql_query_admission::Admission::ResourceBounded) {
                             UnsupportedSourceDisposition::AdmissionResourceBounded
                         } else if matches!(admission, NativeFSharpAdmission::InvalidEncoding)
+                            || matches!(graphql_admission, graphql_query_admission::Admission::InvalidEncoding)
                             || input.encoding == "binary"
                             || opaque_unicode_bom
                             || source_language_route(input, &self.analyzers).is_some()
@@ -19641,6 +19657,14 @@ fn grammar_binary_digest(descriptor: &GrammarDescriptor) -> Result<ContentHash, 
     ])
 }
 
+fn language_disposition_provider_seed() -> &'static [u8] {
+    #[cfg(test)]
+    if graphql_query_admission::predecessor_policy() {
+        return b"rootlight.first-slice.language-disposition/15";
+    }
+    LANGUAGE_DISPOSITION_PROVIDER_SEED
+}
+
 fn first_slice_provider_set_hash() -> Result<ContentHash, FirstSliceError> {
     let parser = first_slice_parser_provider_hash()?;
     let policy_seed = PROVIDER_SET_SEED;
@@ -19682,7 +19706,7 @@ fn first_slice_provider_set_hash() -> Result<ContentHash, FirstSliceError> {
         SEARCH_REVISION_SEED,
         INCREMENTAL_SCHEMA_VERSION.as_bytes(),
         DERIVED_PLAN_REVISION_SEED,
-        LANGUAGE_DISPOSITION_PROVIDER_SEED,
+        language_disposition_provider_seed(),
         SOURCE_FILE_FALLBACK_PROVIDER_SEED,
         container_sources::REVISION,
     ])
@@ -20674,7 +20698,7 @@ fn unsupported_source_document(
         generation,
         producer_kind: ProducerKind::Rule,
         producer,
-        binary_digest: content_hash(LANGUAGE_DISPOSITION_PROVIDER_SEED),
+        binary_digest: content_hash(language_disposition_provider_seed()),
         frontend_version: Some("disposition-1".to_owned()),
         language: input.language.clone(),
         tier: AnalysisTier::TierD,
@@ -27487,6 +27511,7 @@ mod tests {
     mod encoded_file_fallback;
     mod flux_source;
     mod gap_retention;
+    mod graphql_query_admission;
     mod groovy_static_import;
     mod hare_source;
     mod haxe_routing_tests;
