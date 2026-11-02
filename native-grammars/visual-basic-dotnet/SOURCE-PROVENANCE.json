@@ -1,0 +1,108 @@
+{
+  "schema": "rootlight.native-vbnet-source-provenance/1",
+  "package": {
+    "name": "tree-sitter-vbnet",
+    "version": "0.1.0",
+    "unpublished_local_binding": true,
+    "license": "MIT",
+    "rust_version": "1.90"
+  },
+  "upstream": {
+    "repository": "https://github.com/govindbanura/tree-sitter-vbnet",
+    "revision": "538b7087bf80e86004531b392fe1186379c0a2b5",
+    "git_tree": "7ef76689b7296903a6bd36a6d91b4704048172f2",
+    "archive": {
+      "path": "upstream/tree-sitter-vbnet-538b7087bf80e86004531b392fe1186379c0a2b5.zip",
+      "bytes": 246352,
+      "sha256": "3580489dfeeb3be7166b5cb562412a26b9bb964c34d4b3bf5a4f28a1c4f6efd3"
+    },
+    "preserved_authored_files": 17,
+    "signature_verified": false,
+    "lifecycle_or_prebuilt_objects_activated": false,
+    "license_note": "Explicit LICENSE is MIT; original package.json says ISC and remains inert and unmodified."
+  },
+  "preferred_inputs": {
+    "native_abi": 14,
+    "grammar": "grammar.js",
+    "parser": "src/parser.c",
+    "parser_pin": {
+      "bytes": 17550344,
+      "sha256": "c6a2806372abb13872dec16df9a9ede7ad2efc084792aeeef6eab46654e9ce2f"
+    },
+    "scanner": null,
+    "grammar_overlay": "patches/grammar.patch",
+    "generated_parser_hand_edited": false
+  },
+  "generator": {
+    "name": "tree-sitter",
+    "version": "0.26.8",
+    "executable_sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0",
+    "abi": 14,
+    "javascript_runtime": {
+      "name": "node",
+      "executable_sha256": "96f768b95e8e9d443f5eead1cb2d199744923320bb8240d2c3129362e7ae2a5d"
+    },
+    "command": [
+      "tree-sitter",
+      "generate",
+      "--abi",
+      "14",
+      "--js-runtime",
+      "node",
+      "grammar.js"
+    ],
+    "invoked_during_compilation": false
+  },
+  "build": {
+    "acquisition_or_generation": false,
+    "inputs": [
+      "src/parser.c",
+      "src/tree_sitter/parser.h"
+    ],
+    "dependencies": {
+      "tree-sitter-language": "0.1.7",
+      "cc": "1.2.67"
+    }
+  },
+  "local_integration": {
+    "workspace": "standalone; root workspace manifests are unchanged",
+    "target_policy": "dedicated source-root-owned target outside this authenticated package",
+    "dependency_lock": "current reviewed root lock dependency closure; package-local only, no root dependency upgrades",
+    "manifest_change": "standalone workspace boundary plus reviewed tree-sitter0.26.11 dev dependency",
+    "retained_manifest_sha256": "de817a8f9f009e44299d350e429d44c0dc1a93f4b2137cafd4d4653c2e1a3e56",
+    "manifest_sha256": "2ecddf627258d6731ce4f38169c94595341a1897a37dee2d3ac28972abf065c6"
+  },
+  "historical_native_evidence": {
+    "scope": "historical finite native grammar evidence for the retained identical parser; not current Rust or product qualification",
+    "two_ABI14_producers_literal_equal": true,
+    "complete_original_clean_with_physical_EOF": true,
+    "generic_expected_verdicts_matched": 42,
+    "generic_clean": 31,
+    "generic_syntax_refusal": 11,
+    "upstream_failed_cases_baseline": 17,
+    "upstream_failed_cases_preferred": 17,
+    "upstream_new_regressions": false,
+    "upstream_all_green": false,
+    "whole_language_percent": null,
+    "installed_or_empty_cache_network_denial_verified": false
+  },
+  "inventory": {
+    "path": "SOURCE-INVENTORY.json",
+    "scope": "all package payload except SOURCE-INVENTORY.json and SOURCE-PROVENANCE.json"
+  },
+  "test_sources": {
+    "repository": "https://github.com/ChrisAnd1998/TaskbarX",
+    "revision": "4bc446c147c116c140689ca3de84a336bb29d338",
+    "original_path": "TaskbarX/TaskbarX/TaskbarAnimate.vb",
+    "retained_path": "tests/fixtures/taskbarx/TaskbarAnimate.vb",
+    "bytes": 4124,
+    "sha256": "6f0d16772754e2d65fd3ec4c6cc966f4c97a2ff4aa84e9fac6f66d197b824c27",
+    "physical_form": "UTF-8 BOM,106CRLF,no final newline",
+    "license": {
+      "path": "tests/fixtures/taskbarx/LICENSE-TASKBARX",
+      "bytes": 1094,
+      "sha256": "f9afba428577722cc31cdf8ff6e1a68effb009694c65522c57d468187b0a83a2"
+    },
+    "manual_census": "ROOTLIGHT_VBNET_CORPUS explicitly supplies the original repository; complete expected denominator19files/277939bytes; syntax gaps reported separately from census execution"
+  }
+}

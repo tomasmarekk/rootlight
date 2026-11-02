@@ -1,0 +1,26 @@
+# Local static binding for pinned VB.NET source with the reviewed EOF overlay.
+# Authenticated upstream objects and lifecycle scripts remain inert under upstream/.
+[package]
+name = "tree-sitter-vbnet"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/govindbanura/tree-sitter-vbnet"
+description = "Pinned VB.NET syntax tables with a local static binding"
+publish = false
+build = "bindings/rust/build.rs"
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"
+
+[workspace]
+
+[dev-dependencies]
+tree-sitter = "=0.26.11"
