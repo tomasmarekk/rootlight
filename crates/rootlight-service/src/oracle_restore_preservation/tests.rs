@@ -842,6 +842,218 @@ fn workspace_reuses_high_water_but_host_refusal_never_advances_its_owner() {
     assert_eq!(charged, 300);
 }
 
+fn final_admission_fixture(cancellation: &Cancellation) -> (NormalizedIrDocument, FinalAdmission) {
+    let bytes = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/compatibility/ir/1.1/document.json"
+    ));
+    let rootlight_ir::IrDocument::NormalizedV1_1(original) =
+        rootlight_ir::decode_ir_document(bytes, &IrLimits::default(), &ExtensionSupport::default())
+            .unwrap()
+    else {
+        panic!("normalized fixture required");
+    };
+    let manifest_hash = content_hash(b"final-admission-profile-manifest");
+    let configuration_hash = content_hash(b"final-admission-profile-config");
+    let provider_set_hash = content_hash(b"final-admission-profile-provider");
+    let generation = derive_generation(GenerationIdentity {
+        repository: original.repository,
+        parent: None,
+        manifest_hash,
+        config_hash: configuration_hash,
+        provider_set_hash,
+        format_version: generation_format_version(),
+    })
+    .id();
+    let rebound = String::from_utf8(bytes.to_vec())
+        .unwrap()
+        .replace(&original.generation.to_string(), &generation.to_string());
+    let rootlight_ir::IrDocument::NormalizedV1_1(document) = rootlight_ir::decode_ir_document(
+        rebound.as_bytes(),
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+    )
+    .unwrap() else {
+        panic!("generation-rebound normalized fixture required");
+    };
+    let metadata = GenerationMetadata::new(
+        document.repository,
+        document.generation,
+        None,
+        manifest_hash,
+        configuration_hash,
+        provider_set_hash,
+    )
+    .unwrap();
+    let claims = document
+        .files
+        .iter()
+        .map(|file| FileIdentityClaim {
+            file: file.id,
+            repository: file.repository,
+            path: file.path.clone(),
+            path_identity: RelativePath::parse(Path::new(&file.path))
+                .unwrap()
+                .identity_bytes()
+                .to_vec(),
+            content_hash: file.content_hash,
+            byte_length: file.byte_length,
+        })
+        .collect::<Vec<_>>();
+    let descriptions = claims
+        .iter()
+        .zip(&document.files)
+        .map(|(claim, file)| durable::restore_envelope::Source {
+            claim,
+            language: &file.language,
+            encoding: &file.encoding,
+            generated: file.generated,
+        })
+        .collect::<Vec<_>>();
+    let envelope = durable::restore_envelope::Envelope::prepare(
+        metadata,
+        &descriptions,
+        cancellation,
+        &mut |_| Ok(()),
+    )
+    .unwrap();
+    (
+        document,
+        FinalAdmission {
+            envelope,
+            workspace: Workspace::default(),
+            expected_final_plan: None,
+        },
+    )
+}
+
+fn assert_final_admission_profile_refusal(prepare_final: bool) {
+    let cancellation = Cancellation::new();
+    let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+    let (document, mut restore) = final_admission_fixture(&cancellation);
+    let service = FirstSliceService::new(2).unwrap();
+    let half = MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES / 2;
+    let other_id = GenerationId::from_bytes([0x91; 20]);
+    assert_ne!(document.generation, other_id);
+    let mut reservation = service
+        .reserve_generation_memory(document.generation, half, PendingGenerationMemory::Reserved)
+        .unwrap();
+    let other = service
+        .reserve_generation_memory(other_id, half, PendingGenerationMemory::Reserved)
+        .unwrap();
+    let mut output = generation_admission::GenerationAdmission::new(half).unwrap();
+    let mut first_delta = 0;
+    let mut original_error = None;
+    let mut admission = |bytes| {
+        let result = output.admit_known_bytes(bytes, &mut reservation, false, &cancellation);
+        if let Err(error) = result {
+            if original_error.is_none() {
+                first_delta = bytes;
+            }
+            original_error.get_or_insert(error);
+        }
+        result
+    };
+    let (result, profile) = capture_first_slice_analysis_profile(|| {
+        let result = if prepare_final {
+            restore.prepare_final(
+                document.clone(),
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+                &context,
+                &cancellation,
+                &mut admission,
+            )
+        } else {
+            restore.resolve(
+                document.clone(),
+                ResolutionLimits::default(),
+                &IrLimits::default(),
+                &ExtensionSupport::default(),
+                &context,
+                &[],
+                &cancellation,
+                &mut admission,
+            )
+        };
+        if !prepare_final {
+            // A later boundary must not replace the first refusal observation.
+            assert!(matches!(
+                restore.prepare_final(
+                    document.clone(),
+                    &IrLimits::default(),
+                    &ExtensionSupport::default(),
+                    &context,
+                    &cancellation,
+                    &mut admission,
+                ),
+                Err(FirstSliceError::GenerationMemoryLimit { .. })
+            ));
+        }
+        result
+    });
+    let error = result.unwrap_err();
+    assert!(first_delta > 0 && first_delta < half);
+    assert_eq!(Some(error), original_error);
+    let breakdown = GenerationMemoryBreakdown {
+        retained_bytes: 0,
+        reserved_bytes: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
+        owned_bytes: 0,
+        referenced_bytes: 0,
+        mapped_bytes: 0,
+        staged_bytes: first_delta,
+        shared_bytes: 0,
+    };
+    assert_eq!(
+        error,
+        FirstSliceError::GenerationMemoryLimit {
+            breakdown,
+            observed: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES + first_delta,
+            limit: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
+        }
+    );
+    assert_eq!(restore.workspace.peak, 0);
+    assert!(restore.expected_final_plan.is_none());
+    assert_eq!(output.charged_bytes(), 0);
+    assert_eq!(output.reservation_bytes(), half);
+    let cache = service.generation_cache.lock().unwrap();
+    assert_eq!(cache.reservations.len(), 2);
+    assert_eq!(cache.reservations.get(&document.generation), Some(&half));
+    assert_eq!(cache.reservations.get(&other_id), Some(&half));
+    drop(cache);
+    assert!(profile.resolution_restore_refusal.is_none());
+    let encoded = serde_json::to_value(&profile).unwrap();
+    assert_eq!(
+        encoded["first_final_admission_failure"],
+        serde_json::json!({
+            "site": if prepare_final { "prepare_final" } else { "premeasure" },
+            "observed": MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES + first_delta,
+            "limit": MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
+            "breakdown": breakdown,
+        })
+    );
+    drop(other);
+    drop(reservation);
+    assert!(
+        service
+            .generation_cache
+            .lock()
+            .unwrap()
+            .reservations
+            .is_empty()
+    );
+}
+
+#[test]
+fn final_admission_premeasure_refusal_profiles_original_memory_error() {
+    assert_final_admission_profile_refusal(false);
+}
+
+#[test]
+fn final_admission_prepare_final_refusal_profiles_original_memory_error() {
+    assert_final_admission_profile_refusal(true);
+}
+
 #[test]
 fn healthy_graph_reuses_admitted_undo_workspace_without_additional_host_request() {
     let cancellation = Cancellation::new();

@@ -931,7 +931,10 @@ impl FinalAdmission {
             let measured = OracleLayoutFragment::measure(&document, 0, context, &mut |bytes| {
                 self.workspace.admit(bytes, admission)
             })
-            .map_err(|error| catalog(error, cancellation))?;
+            .map_err(|error| catalog(error, cancellation))
+            .inspect_err(|error| {
+                observe_final_admission_failure(FinalAdmissionFailureSite::Premeasure, error);
+            })?;
             let plan = measured
                 .read_memory_plan(context)
                 .map_err(|error| map_catalog_error(&error, cancellation))?;
@@ -953,6 +956,9 @@ impl FinalAdmission {
                 tests::admit_undo_additional(added)?;
                 admission(added)
             })
+        })
+        .inspect_err(|error| {
+            observe_final_admission_failure(FinalAdmissionFailureSite::Undo, error);
         })?;
         #[cfg(test)]
         tests::observe_captured_undo(undo_bytes);
@@ -974,7 +980,10 @@ impl FinalAdmission {
             OracleLayoutFragment::measure(&candidate, undo_bytes, context, &mut |bytes| {
                 self.workspace.admit(bytes, admission)
             })
-            .map_err(|error| catalog(error, cancellation))?;
+            .map_err(|error| catalog(error, cancellation))
+            .inspect_err(|error| {
+                observe_final_admission_failure(FinalAdmissionFailureSite::Postmeasure, error);
+            })?;
         let rejected_plan = measured
             .read_memory_plan(context)
             .map_err(|error| map_catalog_error(&error, cancellation))?;
@@ -1032,7 +1041,10 @@ impl FinalAdmission {
         let measured = OracleLayoutFragment::measure(&document, 0, context, &mut |bytes| {
             self.workspace.admit(bytes, admission)
         })
-        .map_err(|error| catalog(error, cancellation))?;
+        .map_err(|error| catalog(error, cancellation))
+        .inspect_err(|error| {
+            observe_final_admission_failure(FinalAdmissionFailureSite::RollbackMeasure, error);
+        })?;
         let observed = self.envelope.observed(
             measured
                 .read_memory_plan(context)
@@ -1088,7 +1100,10 @@ impl FinalAdmission {
         let measured = OracleLayoutFragment::measure(&document, 0, context, &mut |bytes| {
             self.workspace.admit(bytes, admission)
         })
-        .map_err(|error| catalog(error, cancellation))?;
+        .map_err(|error| catalog(error, cancellation))
+        .inspect_err(|error| {
+            observe_final_admission_failure(FinalAdmissionFailureSite::PrepareFinal, error);
+        })?;
         let plan = measured
             .read_memory_plan(context)
             .map_err(|error| map_catalog_error(&error, cancellation))?;

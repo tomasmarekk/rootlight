@@ -298,6 +298,7 @@ pub struct FirstSliceAnalysisProfile {
     first_oracle_restore_refusal: Option<oracle_restore_preservation::RefusalObservation>,
     later_oracle_restore_refusals: u64,
     resolution_restore_refusal: Option<oracle_restore_preservation::ResolutionRefusalObservation>,
+    first_final_admission_failure: Option<FinalAdmissionFailureObservation>,
     last_sealed_oracle_restore_refusal: Option<durable::SealedOracleRestoreRefusal>,
     aggregate_append_rejections: AnalysisProfileAggregateAppendRejections,
     append: AnalysisProfileAppend,
@@ -340,6 +341,7 @@ impl Default for FirstSliceAnalysisProfile {
             first_oracle_restore_refusal: None,
             later_oracle_restore_refusals: 0,
             resolution_restore_refusal: None,
+            first_final_admission_failure: None,
             last_sealed_oracle_restore_refusal: None,
             aggregate_append_rejections: AnalysisProfileAggregateAppendRejections::default(),
             append: AnalysisProfileAppend::default(),
@@ -978,6 +980,44 @@ fn with_analysis_profile(observe: impl FnOnce(&mut FirstSliceAnalysisProfile)) {
             observe(profile);
         }
     });
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum FinalAdmissionFailureSite {
+    Premeasure,
+    Undo,
+    Postmeasure,
+    RollbackMeasure,
+    PrepareFinal,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct FinalAdmissionFailureObservation {
+    site: FinalAdmissionFailureSite,
+    observed: u64,
+    limit: u64,
+    breakdown: GenerationMemoryBreakdown,
+}
+
+fn observe_final_admission_failure(site: FinalAdmissionFailureSite, error: &FirstSliceError) {
+    if let FirstSliceError::GenerationMemoryLimit {
+        breakdown,
+        observed,
+        limit,
+    } = error
+    {
+        with_analysis_profile(|profile| {
+            if profile.first_final_admission_failure.is_none() {
+                profile.first_final_admission_failure = Some(FinalAdmissionFailureObservation {
+                    site,
+                    observed: *observed,
+                    limit: *limit,
+                    breakdown: *breakdown,
+                });
+            }
+        });
+    }
 }
 
 fn analysis_profile_enabled() -> bool {
@@ -18053,7 +18093,7 @@ impl FirstSliceIdentityFailure {
 }
 
 /// Source-free component accounting for one failed generation-memory admission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct GenerationMemoryBreakdown {
     /// Total memory retained by already admitted generations.
     pub retained_bytes: u64,
