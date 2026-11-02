@@ -13,6 +13,8 @@ const TREE_SITTER_MAX_ABI: usize = 15;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum GrammarFamily {
+    /// Native DQL query roles; schema targets and execution remain separate.
+    Dql,
     /// Native N-Triples statements; RDF graph evaluation remains separate.
     NTriples,
     /// Native standard N-Quads roles; dataset evaluation remains separate.
@@ -339,8 +341,9 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(115);
+        let mut descriptors = Vec::with_capacity(116);
         for family in [
+            GrammarFamily::Dql,
             GrammarFamily::NTriples,
             GrammarFamily::NQuads,
             GrammarFamily::NQuadsDgraph,
@@ -557,6 +560,7 @@ pub(crate) fn native_family_for_source(family: GrammarFamily, path: &str) -> Gra
 
 pub(crate) fn language_for(family: GrammarFamily) -> Language {
     match family {
+        GrammarFamily::Dql => rootlight_tree_sitter_dql::LANGUAGE.into(),
         GrammarFamily::NTriples => rootlight_tree_sitter_ntriples::LANGUAGE.into(),
         GrammarFamily::NQuads => rootlight_tree_sitter_nquads::LANGUAGE.into(),
         GrammarFamily::NQuadsDgraph => rootlight_tree_sitter_nquads_dgraph::LANGUAGE.into(),
@@ -782,6 +786,15 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             parser_sha256: "ac05831209cb07be7cf3e21c349f3a585b5502cc978de4c0458fb2cbde37da87",
             scanner_sha256: Some(
                 "c19fbdb075f255928cb105291e1fe1ad9bee896bd2c0d0d9c634ab7914a349cb",
+            ),
+        },
+        GrammarFamily::Dql => GrammarIdentity {
+            language_id: "dql",
+            grammar_version: "0.1.0",
+            source_package_sha256: "e2cc3e0a1fe58bb4eb778df636d81e1ca18044ef7f9d384c6d00eb2d1d630bda",
+            parser_sha256: "f19eef4ed5d0d5a6fa25ea32c76791464090d0dc2d51d14419848310c38ff477",
+            scanner_sha256: Some(
+                "e0468515bfc343765c349fe59f9447614cb3fa4edfee0856750eeda1e5ac43d1",
             ),
         },
         GrammarFamily::NQuadsDgraph => GrammarIdentity {
@@ -1688,8 +1701,9 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 115);
+        assert_eq!(registry.descriptors().len(), 116);
         for family in [
+            GrammarFamily::Dql,
             GrammarFamily::NTriples,
             GrammarFamily::NQuads,
             GrammarFamily::NQuadsDgraph,
@@ -2061,6 +2075,7 @@ mod tests {
 
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
         for (family, language, package) in [
+            (GrammarFamily::Dql, "dql", "rootlight-tree-sitter-dql"),
             (
                 GrammarFamily::NTriples,
                 "ntriples",
@@ -2251,7 +2266,10 @@ mod tests {
                 // require xtask to verify every checked-in source byte.
                 if matches!(
                     family,
-                    GrammarFamily::NTriples | GrammarFamily::NQuads | GrammarFamily::NQuadsDgraph
+                    GrammarFamily::Dql
+                        | GrammarFamily::NTriples
+                        | GrammarFamily::NQuads
+                        | GrammarFamily::NQuadsDgraph
                 ) {
                     assert_eq!(
                         quoted_field(grammar, "manifest_path"),
@@ -2274,6 +2292,7 @@ mod tests {
                             GrammarFamily::NTriples
                                 | GrammarFamily::NQuads
                                 | GrammarFamily::NQuadsDgraph
+                                | GrammarFamily::Dql
                                 | GrammarFamily::Sparql
                                 | GrammarFamily::N3
                                 | GrammarFamily::Trig

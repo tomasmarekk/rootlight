@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "c182df3d55b4fb2cf21a93759eb07b419072e58024afa03ebe4091630dcead05";
+    "31ead3ba2d30f29863c92db17de6e3e9ecd185215c147a4316646864950d7c38";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -221,7 +221,13 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 71] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 72] = [
+    (
+        "rootlight-tree-sitter-dql",
+        "0.1.0",
+        "native-grammars/dql",
+        "e2cc3e0a1fe58bb4eb778df636d81e1ca18044ef7f9d384c6d00eb2d1d630bda",
+    ),
     (
         "rootlight-tree-sitter-nquads-dgraph",
         "0.1.0",
@@ -941,7 +947,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 112 {
+    if manifest.grammars.len() != 113 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -966,6 +972,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         }
     }
     let expected_languages = BTreeSet::from([
+        "dql",
         "nquads-dgraph",
         "nquads",
         "ntriples",
@@ -1343,6 +1350,7 @@ fn is_tree_sitter_package(name: &str) -> bool {
     name == "tree-sitter"
         || name == "rootlight-tree-sitter-nquads"
         || name == "rootlight-tree-sitter-nquads-dgraph"
+        || name == "rootlight-tree-sitter-dql"
         || name == "rootlight-tree-sitter-ntriples"
         || name == "dekobon-tree-sitter-groovy"
         || name.starts_with("tree-sitter-")
@@ -1923,6 +1931,7 @@ mod tests {
     #[test]
     fn native_manifest_rejects_missing_or_extra_languages() {
         for language in [
+            "dql",
             "nquads-dgraph",
             "nquads",
             "ntriples",
@@ -1939,7 +1948,7 @@ mod tests {
                 .retain(|grammar| grammar.language != language);
             assert!(matches!(
                 validate_manifest(&manifest),
-                Err(GrammarLockError::GrammarCount(111))
+                Err(GrammarLockError::GrammarCount(112))
             ));
         }
         let mut manifest: GrammarLock =
@@ -2009,6 +2018,7 @@ mod tests {
     #[test]
     fn native_dependency_roster_requires_each_declared_local_package() {
         for package in [
+            "rootlight-tree-sitter-dql",
             "rootlight-tree-sitter-nquads-dgraph",
             "rootlight-tree-sitter-nquads",
             "rootlight-tree-sitter-ntriples",
@@ -2022,6 +2032,55 @@ mod tests {
             assert!(matches!(
                 validate_tree_sitter_dependencies(&dependencies, Path::new("/workspace")),
                 Err(GrammarLockError::DependencySet)
+            ));
+        }
+    }
+
+    #[test]
+    fn dql_first_party_grammar_authenticates_all_twenty_sources() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let directory = root.join("native-grammars/dql");
+        let manifest: GrammarLock =
+            toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+        let grammar = manifest
+            .grammars
+            .iter()
+            .find(|grammar| grammar.language == "dql")
+            .unwrap();
+        let sources = grammar.vendored.as_ref().unwrap();
+        assert_eq!(sources.files.len(), 20);
+        assert_eq!(grammar.crate_name, "rootlight-tree-sitter-dql");
+        assert_eq!(grammar.commit, "ecb916f0c648eb6174f60a4079c0a081d08aea28");
+        assert!(grammar.crates_io_checksum.is_none());
+        validate_vendored_tree(&directory, grammar, sources).unwrap();
+        for missing in [
+            "LICENSE-DGRAPH",
+            "SOURCE-PROVENANCE.json",
+            "tests/fixtures/suite02.dql",
+        ] {
+            let mut incomplete_manifest: GrammarLock =
+                toml::from_str(include_str!("../../adapters/grammars.lock")).unwrap();
+            let incomplete = incomplete_manifest
+                .grammars
+                .iter_mut()
+                .find(|grammar| grammar.language == "dql")
+                .unwrap();
+            incomplete
+                .vendored
+                .as_mut()
+                .unwrap()
+                .files
+                .remove(missing)
+                .unwrap();
+            incomplete.vendored_source_sha256 =
+                Some(vendored_source_digest(&incomplete.vendored.as_ref().unwrap().files).unwrap());
+            assert!(matches!(
+                validate_vendored_tree(
+                    &directory,
+                    incomplete,
+                    incomplete.vendored.as_ref().unwrap()
+                ),
+                Err(GrammarLockError::PackageEvidence { .. })
             ));
         }
     }

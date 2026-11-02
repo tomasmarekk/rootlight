@@ -1718,6 +1718,7 @@ dependencies = [
  "rootlight-ids",
  "rootlight-ir",
  "rootlight-thinkscript",
+ "rootlight-tree-sitter-dql",
  "rootlight-tree-sitter-nquads",
  "rootlight-tree-sitter-nquads-dgraph",
  "rootlight-tree-sitter-ntriples",
@@ -2430,6 +2431,14 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "rootlight-cancel",
+]
+
+[[package]]
+name = "rootlight-tree-sitter-dql"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
 ]
 
 [[package]]

@@ -8,6 +8,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rootlight-tree-sitter-dql.workspace = true
 rootlight-tree-sitter-ntriples.workspace = true
 rootlight-tree-sitter-nquads.workspace = true
 rootlight-tree-sitter-nquads-dgraph.workspace = true

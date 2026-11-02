@@ -48,6 +48,7 @@ mod d;
 mod dart;
 #[cfg(test)]
 mod deferred_tests;
+mod dql;
 mod ecmascript;
 mod eiffel;
 mod eiffel_formal_reads;
@@ -486,7 +487,10 @@ impl QueryPack {
         let mut expected = EXPECTED_CAPTURES.to_vec();
         if matches!(
             family,
-            GrammarFamily::NTriples | GrammarFamily::NQuads | GrammarFamily::NQuadsDgraph
+            GrammarFamily::Dql
+                | GrammarFamily::NTriples
+                | GrammarFamily::NQuads
+                | GrammarFamily::NQuadsDgraph
         ) {
             expected = vec!["comment", "expression", "module", "root", "string"];
         }
@@ -906,7 +910,7 @@ impl QueryPack {
                 .any(|(quantifier, role)| {
                     *quantifier != CaptureQuantifier::Zero
                         && (role.belongs_to_identity_closure()
-                            || (matches!(family, GrammarFamily::CMake | GrammarFamily::NTriples | GrammarFamily::NQuads | GrammarFamily::NQuadsDgraph)
+                            || (matches!(family, GrammarFamily::CMake | GrammarFamily::Dql | GrammarFamily::NTriples | GrammarFamily::NQuads | GrammarFamily::NQuadsDgraph)
                                 && *role == StructuralRole::Expression)
                             // Source-certified references remain mandatory even when
                             // their native pattern has no declaration capture.
@@ -1153,6 +1157,7 @@ impl QueryPack {
                         GrammarFamily::NTriples
                             | GrammarFamily::NQuads
                             | GrammarFamily::NQuadsDgraph
+                            | GrammarFamily::Dql
                     ) && candidate.required
                         && candidate.role == StructuralRole::Expression)
                     || (family == GrammarFamily::Nix
@@ -3269,7 +3274,14 @@ impl QueryPack {
                     }
                     continue;
                 }
-                let candidate = if input.family == GrammarFamily::NQuadsDgraph {
+                let candidate = if input.family == GrammarFamily::Dql {
+                    let Some(candidate) =
+                        dql::candidate(capture.node, role, input.source, input.cancellation)?
+                    else {
+                        continue;
+                    };
+                    Ok(candidate)
+                } else if input.family == GrammarFamily::NQuadsDgraph {
                     let Some(candidate) = nquads_dgraph::candidate(
                         capture.node,
                         role,
@@ -4821,6 +4833,7 @@ fn candidate_for_capture(
             GrammarFamily::Wesl => return Err(query_failure("query-wesl-unproven-call")),
             GrammarFamily::Sparql => return Err(query_failure("query-sparql-unproven-call")),
             GrammarFamily::N3 => return Err(query_failure("query-n3-unproven-call")),
+            GrammarFamily::Dql => return Err(query_failure("query-dql-unproven-call")),
             GrammarFamily::NTriples => return Err(query_failure("query-ntriples-unproven-call")),
             GrammarFamily::NQuads => return Err(query_failure("query-nquads-unproven-call")),
             GrammarFamily::NQuadsDgraph => {
@@ -5352,6 +5365,7 @@ fn canonical_syntax(family: GrammarFamily, native: &str) -> Option<&'static str>
     match (family, native) {
         (GrammarFamily::Sparql, "unit") => Some("sparql.file"),
         (GrammarFamily::N3, "n3_doc") => Some("n3.file"),
+        (GrammarFamily::Dql, "document") => Some("dql.file"),
         (GrammarFamily::NTriples, "document") => Some("ntriples.file"),
         (GrammarFamily::NQuads, "document") => Some("nquads.file"),
         (GrammarFamily::NQuadsDgraph, "document") => Some("nquads-dgraph.file"),
@@ -5965,7 +5979,7 @@ impl QueryPackRegistry {
     }
 
     fn catalogue() -> Self {
-        let mut packs = Vec::with_capacity(112);
+        let mut packs = Vec::with_capacity(113);
         for (family, source) in [
             (
                 GrammarFamily::Clojure,
@@ -6060,6 +6074,7 @@ impl QueryPackRegistry {
                 GrammarFamily::NTriples,
                 include_str!("../queries/ntriples.scm"),
             ),
+            (GrammarFamily::Dql, include_str!("../queries/dql.scm")),
             (GrammarFamily::NQuads, include_str!("../queries/nquads.scm")),
             (
                 GrammarFamily::NQuadsDgraph,
@@ -6448,10 +6463,11 @@ mod tests {
     #[test]
     fn reviewed_packs_compile_with_the_exact_closed_capture_contract() {
         let registry = QueryPackRegistry::audited().expect("reviewed packs compile");
-        assert_eq!(registry.len(), 117);
+        assert_eq!(registry.len(), 118);
         assert_eq!(registry.initialized_count(), registry.len());
 
         for family in [
+            GrammarFamily::Dql,
             GrammarFamily::NTriples,
             GrammarFamily::NQuads,
             GrammarFamily::NQuadsDgraph,
@@ -6569,7 +6585,10 @@ mod tests {
             let mut expected = EXPECTED_CAPTURES.to_vec();
             if matches!(
                 family,
-                GrammarFamily::NTriples | GrammarFamily::NQuads | GrammarFamily::NQuadsDgraph
+                GrammarFamily::Dql
+                    | GrammarFamily::NTriples
+                    | GrammarFamily::NQuads
+                    | GrammarFamily::NQuadsDgraph
             ) {
                 expected = vec!["comment", "expression", "module", "root", "string"];
             }
@@ -7238,6 +7257,56 @@ mod tests {
                 .iter()
                 .filter(|candidate| candidate.required)
                 .count()
+        );
+    }
+
+    #[test]
+    fn dql_expressions_remain_mandatory_beyond_optional_fact_credit() {
+        let source = include_bytes!("../../../native-grammars/dql/tests/fixtures/suite02.dql");
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&language_for(GrammarFamily::Dql))
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+        let pack =
+            QueryPack::compile(GrammarFamily::Dql, include_str!("../queries/dql.scm")).unwrap();
+        let extract = |credit| {
+            pack.extract(
+                GrammarFamily::Dql,
+                &tree,
+                source,
+                10_000,
+                credit,
+                &Cancellation::new(),
+            )
+            .unwrap()
+        };
+        let complete = extract(4096);
+        let limited = extract(1);
+        let required = |extraction: &QueryExtraction| {
+            extraction
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.required)
+                .map(|candidate| (candidate.start, candidate.end, candidate.syntax))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(required(&limited), required(&complete));
+        assert!(
+            limited
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.role == StructuralRole::Expression)
+                .count()
+                > 100
+        );
+        assert!(
+            limited
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.role == StructuralRole::Expression)
+                .all(|candidate| candidate.required)
         );
     }
 
