@@ -130,6 +130,23 @@ struct Workspace {
 }
 
 impl Workspace {
+    fn admit_final(
+        &mut self,
+        bytes: u64,
+        undo: u64,
+        site: FinalAdmissionFailureSite,
+        admission: &mut dyn FnMut(u64) -> Result<(), FirstSliceError>,
+    ) -> Result<(), FirstSliceError> {
+        let workspace = FinalAdmissionWorkspace {
+            peak_before: self.peak,
+            undo,
+            requested: bytes,
+        };
+        self.admit(bytes, admission).inspect_err(|error| {
+            observe_final_admission_failure(site, error, Some(workspace));
+        })
+    }
+
     fn admit(
         &mut self,
         bytes: u64,
@@ -929,11 +946,16 @@ impl FinalAdmission {
         // admission controls and is released before the undo owner is captured.
         let before = if analysis_profile_enabled() {
             let measured = OracleLayoutFragment::measure(&document, 0, context, &mut |bytes| {
-                self.workspace.admit(bytes, admission)
+                self.workspace.admit_final(
+                    bytes,
+                    0,
+                    FinalAdmissionFailureSite::Premeasure,
+                    admission,
+                )
             })
             .map_err(|error| catalog(error, cancellation))
             .inspect_err(|error| {
-                observe_final_admission_failure(FinalAdmissionFailureSite::Premeasure, error);
+                observe_final_admission_failure(FinalAdmissionFailureSite::Premeasure, error, None);
             })?;
             let plan = measured
                 .read_memory_plan(context)
@@ -951,14 +973,19 @@ impl FinalAdmission {
             undo_bytes = undo_bytes
                 .checked_add(bytes)
                 .ok_or(FirstSliceError::Limits)?;
-            self.workspace.admit(undo_bytes, &mut |added| {
-                #[cfg(test)]
-                tests::admit_undo_additional(added)?;
-                admission(added)
-            })
+            self.workspace.admit_final(
+                undo_bytes,
+                undo_bytes,
+                FinalAdmissionFailureSite::Undo,
+                &mut |added| {
+                    #[cfg(test)]
+                    tests::admit_undo_additional(added)?;
+                    admission(added)
+                },
+            )
         })
         .inspect_err(|error| {
-            observe_final_admission_failure(FinalAdmissionFailureSite::Undo, error);
+            observe_final_admission_failure(FinalAdmissionFailureSite::Undo, error, None);
         })?;
         #[cfg(test)]
         tests::observe_captured_undo(undo_bytes);
@@ -978,11 +1005,20 @@ impl FinalAdmission {
         check_cancellation(cancellation)?;
         let measured =
             OracleLayoutFragment::measure(&candidate, undo_bytes, context, &mut |bytes| {
-                self.workspace.admit(bytes, admission)
+                self.workspace.admit_final(
+                    bytes,
+                    undo_bytes,
+                    FinalAdmissionFailureSite::Postmeasure,
+                    admission,
+                )
             })
             .map_err(|error| catalog(error, cancellation))
             .inspect_err(|error| {
-                observe_final_admission_failure(FinalAdmissionFailureSite::Postmeasure, error);
+                observe_final_admission_failure(
+                    FinalAdmissionFailureSite::Postmeasure,
+                    error,
+                    None,
+                );
             })?;
         let rejected_plan = measured
             .read_memory_plan(context)
@@ -1039,11 +1075,20 @@ impl FinalAdmission {
         // The floor promised this exact outcome. Recheck with actual records;
         // divergence remains strict and does not erase the accepted graph.
         let measured = OracleLayoutFragment::measure(&document, 0, context, &mut |bytes| {
-            self.workspace.admit(bytes, admission)
+            self.workspace.admit_final(
+                bytes,
+                0,
+                FinalAdmissionFailureSite::RollbackMeasure,
+                admission,
+            )
         })
         .map_err(|error| catalog(error, cancellation))
         .inspect_err(|error| {
-            observe_final_admission_failure(FinalAdmissionFailureSite::RollbackMeasure, error);
+            observe_final_admission_failure(
+                FinalAdmissionFailureSite::RollbackMeasure,
+                error,
+                None,
+            );
         })?;
         let observed = self.envelope.observed(
             measured
@@ -1098,11 +1143,12 @@ impl FinalAdmission {
             })?;
         check_cancellation(cancellation)?;
         let measured = OracleLayoutFragment::measure(&document, 0, context, &mut |bytes| {
-            self.workspace.admit(bytes, admission)
+            self.workspace
+                .admit_final(bytes, 0, FinalAdmissionFailureSite::PrepareFinal, admission)
         })
         .map_err(|error| catalog(error, cancellation))
         .inspect_err(|error| {
-            observe_final_admission_failure(FinalAdmissionFailureSite::PrepareFinal, error);
+            observe_final_admission_failure(FinalAdmissionFailureSite::PrepareFinal, error, None);
         })?;
         let plan = measured
             .read_memory_plan(context)

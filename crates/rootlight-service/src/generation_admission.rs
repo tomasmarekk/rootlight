@@ -129,6 +129,25 @@ impl GenerationAdmission {
         Ok(())
     }
 
+    /// Observes final workspace components without changing the ledger guard.
+    /// Errors and accepted charges are identical to `admit_known_bytes`.
+    pub(super) fn admit_final_workspace(
+        &mut self,
+        bytes: u64,
+        reservation: &mut GenerationMemoryReservation,
+        durable_cache: bool,
+        cancellation: &Cancellation,
+    ) -> Result<(), FirstSliceError> {
+        self.admit_known_bytes(bytes, reservation, durable_cache, cancellation)
+            .inspect_err(|error| {
+                crate::observe_final_staging_failure(
+                    error,
+                    self.source_preflight_bytes,
+                    self.charged_bytes,
+                );
+            })
+    }
+
     fn admit_serialized<T: Serialize>(
         &mut self,
         value: &T,

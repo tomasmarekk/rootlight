@@ -927,25 +927,38 @@ fn final_admission_fixture(cancellation: &Cancellation) -> (NormalizedIrDocument
     )
 }
 
-fn assert_final_admission_profile_refusal(prepare_final: bool) {
+fn assert_final_admission_profile_refusal(
+    prepare_final: bool,
+    source_floor: u64,
+    observe_staging: bool,
+) {
     let cancellation = Cancellation::new();
     let context = GenerationContext::new(&cancellation, GenerationBudget::default());
     let (document, mut restore) = final_admission_fixture(&cancellation);
     let service = FirstSliceService::new(2).unwrap();
     let half = MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES / 2;
+    let other_bytes = MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES - source_floor;
     let other_id = GenerationId::from_bytes([0x91; 20]);
     assert_ne!(document.generation, other_id);
     let mut reservation = service
-        .reserve_generation_memory(document.generation, half, PendingGenerationMemory::Reserved)
+        .reserve_generation_memory(
+            document.generation,
+            source_floor,
+            PendingGenerationMemory::Reserved,
+        )
         .unwrap();
     let other = service
-        .reserve_generation_memory(other_id, half, PendingGenerationMemory::Reserved)
+        .reserve_generation_memory(other_id, other_bytes, PendingGenerationMemory::Reserved)
         .unwrap();
-    let mut output = generation_admission::GenerationAdmission::new(half).unwrap();
+    let mut output = generation_admission::GenerationAdmission::new(source_floor).unwrap();
     let mut first_delta = 0;
     let mut original_error = None;
     let mut admission = |bytes| {
-        let result = output.admit_known_bytes(bytes, &mut reservation, false, &cancellation);
+        let result = if observe_staging {
+            output.admit_final_workspace(bytes, &mut reservation, false, &cancellation)
+        } else {
+            output.admit_known_bytes(bytes, &mut reservation, false, &cancellation)
+        };
         if let Err(error) = result {
             if original_error.is_none() {
                 first_delta = bytes;
@@ -993,33 +1006,46 @@ fn assert_final_admission_profile_refusal(prepare_final: bool) {
         result
     });
     let error = result.unwrap_err();
-    assert!(first_delta > 0 && first_delta < half);
+    assert!(first_delta > 1 && first_delta < half);
     assert_eq!(Some(error), original_error);
+    let local = source_floor > half;
+    let observed = if local {
+        source_floor + first_delta
+    } else {
+        MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES + first_delta
+    };
     let breakdown = GenerationMemoryBreakdown {
         retained_bytes: 0,
-        reserved_bytes: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
+        reserved_bytes: if local {
+            0
+        } else {
+            MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES
+        },
         owned_bytes: 0,
         referenced_bytes: 0,
         mapped_bytes: 0,
-        staged_bytes: first_delta,
+        staged_bytes: if local { observed } else { first_delta },
         shared_bytes: 0,
     };
     assert_eq!(
         error,
         FirstSliceError::GenerationMemoryLimit {
             breakdown,
-            observed: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES + first_delta,
+            observed,
             limit: MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
         }
     );
     assert_eq!(restore.workspace.peak, 0);
     assert!(restore.expected_final_plan.is_none());
     assert_eq!(output.charged_bytes(), 0);
-    assert_eq!(output.reservation_bytes(), half);
+    assert_eq!(output.reservation_bytes(), source_floor);
     let cache = service.generation_cache.lock().unwrap();
     assert_eq!(cache.reservations.len(), 2);
-    assert_eq!(cache.reservations.get(&document.generation), Some(&half));
-    assert_eq!(cache.reservations.get(&other_id), Some(&half));
+    assert_eq!(
+        cache.reservations.get(&document.generation),
+        Some(&source_floor)
+    );
+    assert_eq!(cache.reservations.get(&other_id), Some(&other_bytes));
     drop(cache);
     assert!(profile.resolution_restore_refusal.is_none());
     let encoded = serde_json::to_value(&profile).unwrap();
@@ -1027,11 +1053,34 @@ fn assert_final_admission_profile_refusal(prepare_final: bool) {
         encoded["first_final_admission_failure"],
         serde_json::json!({
             "site": if prepare_final { "prepare_final" } else { "premeasure" },
-            "observed": MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES + first_delta,
+            "observed": observed,
             "limit": MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES,
             "breakdown": breakdown,
+            "components": {
+                "source_floor_bytes": observe_staging.then_some(source_floor),
+                "accepted_staging_bytes_before": observe_staging.then_some(0_u64),
+                "workspace_peak_before_bytes": 0,
+                "undo_bytes": 0,
+                "requested_workspace_bytes": first_delta,
+            },
         })
     );
+    if local {
+        let components = &profile
+            .first_final_admission_failure
+            .as_ref()
+            .unwrap()
+            .components;
+        let ledger_total = components.source_floor_bytes.unwrap()
+            + components.accepted_staging_bytes_before.unwrap()
+            + components
+                .requested_workspace_bytes
+                .unwrap()
+                .saturating_sub(components.workspace_peak_before_bytes.unwrap());
+        assert_eq!(ledger_total, observed);
+    } else {
+        assert!(source_floor + first_delta <= MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES);
+    }
     drop(other);
     drop(reservation);
     assert!(
@@ -1046,12 +1095,26 @@ fn assert_final_admission_profile_refusal(prepare_final: bool) {
 
 #[test]
 fn final_admission_premeasure_refusal_profiles_original_memory_error() {
-    assert_final_admission_profile_refusal(false);
+    assert_final_admission_profile_refusal(
+        false,
+        MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES / 2,
+        true,
+    );
+    assert_final_admission_profile_refusal(
+        false,
+        MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES - 1,
+        true,
+    );
 }
 
 #[test]
 fn final_admission_prepare_final_refusal_profiles_original_memory_error() {
-    assert_final_admission_profile_refusal(true);
+    assert_final_admission_profile_refusal(
+        true,
+        MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES / 2,
+        false,
+    );
+    assert_final_admission_profile_refusal(true, MAX_FIRST_SLICE_GENERATION_MEMORY_BYTES - 1, true);
 }
 
 #[test]

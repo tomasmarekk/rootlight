@@ -299,6 +299,8 @@ pub struct FirstSliceAnalysisProfile {
     later_oracle_restore_refusals: u64,
     resolution_restore_refusal: Option<oracle_restore_preservation::ResolutionRefusalObservation>,
     first_final_admission_failure: Option<FinalAdmissionFailureObservation>,
+    #[serde(skip)]
+    pending_final_admission_staging_failure: Option<FinalAdmissionStagingFailure>,
     last_sealed_oracle_restore_refusal: Option<durable::SealedOracleRestoreRefusal>,
     aggregate_append_rejections: AnalysisProfileAggregateAppendRejections,
     append: AnalysisProfileAppend,
@@ -342,6 +344,7 @@ impl Default for FirstSliceAnalysisProfile {
             later_oracle_restore_refusals: 0,
             resolution_restore_refusal: None,
             first_final_admission_failure: None,
+            pending_final_admission_staging_failure: None,
             last_sealed_oracle_restore_refusal: None,
             aggregate_append_rejections: AnalysisProfileAggregateAppendRejections::default(),
             append: AnalysisProfileAppend::default(),
@@ -998,9 +1001,52 @@ struct FinalAdmissionFailureObservation {
     observed: u64,
     limit: u64,
     breakdown: GenerationMemoryBreakdown,
+    components: FinalAdmissionFailureComponents,
 }
 
-fn observe_final_admission_failure(site: FinalAdmissionFailureSite, error: &FirstSliceError) {
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+struct FinalAdmissionFailureComponents {
+    source_floor_bytes: Option<u64>,
+    accepted_staging_bytes_before: Option<u64>,
+    workspace_peak_before_bytes: Option<u64>,
+    undo_bytes: Option<u64>,
+    requested_workspace_bytes: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FinalAdmissionWorkspace {
+    peak_before: u64,
+    undo: u64,
+    requested: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FinalAdmissionStagingFailure {
+    error: FirstSliceError,
+    source_floor: u64,
+    accepted: u64,
+}
+
+fn observe_final_staging_failure(error: &FirstSliceError, source_floor: u64, accepted: u64) {
+    if matches!(error, FirstSliceError::GenerationMemoryLimit { .. }) {
+        with_analysis_profile(|profile| {
+            if profile.first_final_admission_failure.is_none() {
+                profile.pending_final_admission_staging_failure =
+                    Some(FinalAdmissionStagingFailure {
+                        error: *error,
+                        source_floor,
+                        accepted,
+                    });
+            }
+        });
+    }
+}
+
+fn observe_final_admission_failure(
+    site: FinalAdmissionFailureSite,
+    error: &FirstSliceError,
+    workspace: Option<FinalAdmissionWorkspace>,
+) {
     if let FirstSliceError::GenerationMemoryLimit {
         breakdown,
         observed,
@@ -1009,11 +1055,24 @@ fn observe_final_admission_failure(site: FinalAdmissionFailureSite, error: &Firs
     {
         with_analysis_profile(|profile| {
             if profile.first_final_admission_failure.is_none() {
+                // Only the exact failed callback can supply its ledger components.
+                let staging = profile
+                    .pending_final_admission_staging_failure
+                    .take()
+                    .filter(|staging| staging.error == *error);
                 profile.first_final_admission_failure = Some(FinalAdmissionFailureObservation {
                     site,
                     observed: *observed,
                     limit: *limit,
                     breakdown: *breakdown,
+                    components: FinalAdmissionFailureComponents {
+                        source_floor_bytes: staging.map(|staging| staging.source_floor),
+                        accepted_staging_bytes_before: staging.map(|staging| staging.accepted),
+                        workspace_peak_before_bytes: workspace
+                            .map(|workspace| workspace.peak_before),
+                        undo_bytes: workspace.map(|workspace| workspace.undo),
+                        requested_workspace_bytes: workspace.map(|workspace| workspace.requested),
+                    },
                 });
             }
         });
@@ -11095,7 +11154,7 @@ impl FirstSliceService {
                 if let Some(restore) = &mut restore_final {
                     restore.resolve(document, resolution_limits, self.analysis_limits.ir(),
                         &self.extensions, &restore_context, &cxx_sources, cancellation, &mut |bytes| {
-                            output_admission.admit_known_bytes(bytes, &mut memory_reservation,
+                            output_admission.admit_final_workspace(bytes, &mut memory_reservation,
                                 self.durable.is_some(), cancellation)
                         })?
                 } else {
@@ -11116,7 +11175,7 @@ impl FirstSliceService {
             derived.append_evidence(&mut document, self.analysis_limits.ir(), cancellation)?;
             if let Some(restore) = &mut restore_final {
                 document = restore.prepare_final(document, self.analysis_limits.ir(), &self.extensions,
-                    &restore_context, cancellation, &mut |bytes| output_admission.admit_known_bytes(
+                    &restore_context, cancellation, &mut |bytes| output_admission.admit_final_workspace(
                         bytes, &mut memory_reservation, self.durable.is_some(), cancellation))?;
             }
             let normalized_facts = normalized_record_count(&document)?;
