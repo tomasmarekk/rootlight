@@ -577,12 +577,16 @@ fn inspect(
     for &file in &arguments.files {
         inspection.require_file(file)?;
         if arguments.rdf_page.is_some()
-            && !inspection
-                .files
-                .get(&file)
-                .is_some_and(|file| matches!(file.language.as_str(), "ntriples" | "nquads"))
+            && !inspection.files.get(&file).is_some_and(|file| {
+                matches!(
+                    file.language.as_str(),
+                    "ntriples" | "nquads" | "nquads-dgraph"
+                )
+            })
         {
-            return Err("RDF page mode requires a native ntriples or nquads file".into());
+            return Err(
+                "RDF page mode requires a native ntriples, nquads or nquads-dgraph file".into(),
+            );
         }
         if arguments.rdf_page.is_none() {
             let receipt = inspection.occurrences(file)?;
@@ -590,11 +594,12 @@ fn inspect(
             occurrence_reads.try_reserve(1)?;
             occurrence_reads.push(receipt);
         }
-        if inspection
-            .files
-            .get(&file)
-            .is_some_and(|file| matches!(file.language.as_str(), "ntriples" | "nquads"))
-        {
+        if inspection.files.get(&file).is_some_and(|file| {
+            matches!(
+                file.language.as_str(),
+                "ntriples" | "nquads" | "nquads-dgraph"
+            )
+        }) {
             if let Some(read) = inspection.rdf_statements(file, arguments.rdf_page)? {
                 rdf_statement_reads.try_reserve(1)?;
                 rdf_statement_reads.push(read);
@@ -727,7 +732,7 @@ fn inspect(
             "full_generation_identity_rederived":false,"database_bytes_pinned":false,
             "query_projection_executed":false,"sources_indexed":false,
             "typed_rdf_query_executed":rdf_executed,"rdf_statement_reads_complete":rdf_complete,
-            "rdf_statement_scope":"selected_native_ntriples_or_nquads_files_only",
+            "rdf_statement_scope":"selected_native_ntriples_nquads_or_nquads_dgraph_files_only",
             "source_code_executed":false,"public_queries_qualified":false,
             "installed_mcp_qualified":false,"full_semantic_completeness_proven":false
         }),
@@ -842,7 +847,8 @@ fn main() -> DiagnosticResult<()> {
 mod tests {
     use super::*;
     use rootlight_catalog::OracleWriter;
-    use rootlight_service::FirstSliceService;
+    use rootlight_runtime::RuntimePaths;
+    use rootlight_service::{FirstSliceService, FirstSliceStoragePolicy};
     use rootlight_storage::IdentityVerifiedGeneration;
 
     fn fact(byte: u8) -> FactId {
@@ -1017,13 +1023,30 @@ mod tests {
         name: &str,
         text: &str,
     ) -> (tempfile::TempDir, PathBuf, OracleReader, FileId) {
+        sealed_rdf_fixture_with_configuration(name, text, None)
+    }
+
+    fn sealed_rdf_fixture_with_configuration(
+        name: &str,
+        text: &str,
+        configuration: Option<&str>,
+    ) -> (tempfile::TempDir, PathBuf, OracleReader, FileId) {
         let directory = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(directory.path()).unwrap();
         let source_root = root.join("source");
         std::fs::create_dir(&source_root).unwrap();
         std::fs::write(source_root.join(name), text).unwrap();
         let cancellation = Cancellation::new();
-        let mut service = FirstSliceService::new(1).unwrap();
+        let mut service = if let Some(configuration) = configuration {
+            let paths = RuntimePaths::new(root.join("state"), root.join("runtime")).unwrap();
+            paths.prepare_owner().unwrap();
+            let policy =
+                FirstSliceStoragePolicy::resolve_user_config(Some(configuration), 1).unwrap();
+            FirstSliceService::new_durable_with_policy(policy, paths.state_dir(), &cancellation)
+                .unwrap()
+        } else {
+            FirstSliceService::new(1).unwrap()
+        };
         let receipt = service
             .index_repository(&source_root, &cancellation)
             .unwrap();
@@ -1158,6 +1181,112 @@ mod tests {
     }
 
     #[test]
+    fn configured_cold_dgraph_pages_preserve_native_v3_bytes_and_source_identity() {
+        let configuration = "version='1.3'\n\
+[extensions.source-languages]\nversion='1.0'\ncritical=true\n\
+[extensions.source-languages.data.paths]\n'statements.nq'='nquads-dgraph'\n";
+        let text = "<alice><follows><bob>.\n<alice><status>\"\\xFF\\v\".\n<0x01><follows><λ0>.\n";
+        let (_directory, oracle, reader, file) =
+            sealed_rdf_fixture_with_configuration("statements.nq", text, Some(configuration));
+        let metadata = reader.metadata();
+        drop(reader);
+        let cancellation = Cancellation::new();
+        let reader = OracleReader::open_in(
+            &oracle,
+            &GenerationContext::new(&cancellation, GenerationBudget::default()),
+        )
+        .unwrap();
+        assert_eq!(reader.metadata(), metadata);
+        let report = inspect_rdf_fixture(
+            &reader,
+            &oracle,
+            file,
+            Some(RdfPageSelection {
+                limit: GenerationReadLimit::new(MAX_RDF_PAGE_SIZE).unwrap(),
+                after: None,
+            }),
+        );
+        assert_eq!(report.files.len(), 1);
+        assert_eq!(report.files[0].language, "nquads-dgraph");
+        let read = &report.rdf_statement_reads[0];
+        assert!(read.complete);
+        let mut statements: Vec<_> = read
+            .pages
+            .iter()
+            .flat_map(|page| page.statements())
+            .map(|record| record.statement())
+            .collect();
+        statements.sort_by_key(|statement| statement.source().span().start_byte());
+        assert_eq!(statements.len(), 3);
+        assert_eq!(statements[0].subject().dgraph_identifier(), Some("alice"));
+        assert_eq!(statements[0].object().dgraph_identifier(), Some("bob"));
+        assert_eq!(
+            statements[1].object().dgraph_default_value(),
+            Some([255, 11].as_slice())
+        );
+        assert!(statements[1].object().dgraph_default_text().is_none());
+        assert_eq!(statements[2].subject().dgraph_identifier(), Some("0x01"));
+        assert_eq!(statements[2].object().dgraph_identifier(), Some("λ0"));
+        for statement in &statements {
+            assert_eq!(
+                statement.format(),
+                rootlight_ir::RdfStatementFormat::NQuadsDgraph
+            );
+            assert!(statement.graph().is_none());
+            assert_eq!(statement.source().span().file(), file);
+            assert_eq!(statement.source().generation(), metadata.generation());
+            assert_eq!(
+                statement.source().content_hash(),
+                rootlight_ids::content_hash(text.as_bytes())
+            );
+            let span = statement.source().span();
+            statement
+                .verify_source_text(
+                    &text[usize::try_from(span.start_byte()).unwrap()
+                        ..usize::try_from(span.end_byte()).unwrap()],
+                )
+                .unwrap();
+            for term in [
+                statement.subject(),
+                statement.predicate(),
+                statement.object(),
+            ] {
+                assert!(term.iri().is_none());
+                assert!(term.datatype().is_none());
+                assert!(term.language().is_none());
+                assert!(term.literal_value().is_none());
+            }
+        }
+        assert!(report.occurrence_reads.is_empty());
+        assert_eq!(report.qualification["typed_rdf_query_executed"], true);
+        assert_eq!(report.qualification["rdf_statement_reads_complete"], true);
+        let serialized = serde_json::to_value(&report).unwrap();
+        let records = serialized["rdf_statement_reads"][0]["pages"][0]["statements"]
+            .as_array()
+            .unwrap();
+        assert_eq!(records.len(), 3);
+        assert!(
+            records
+                .iter()
+                .all(|record| record["statement"]["format"] == "n_quads_dgraph"
+                    && record["statement"].get("graph").is_none())
+        );
+        let value = records
+            .iter()
+            .find(|record| record["statement"]["object"]["value"]["kind"] == "dgraph_default_value")
+            .unwrap();
+        assert_eq!(
+            value["statement"]["object"]["value"]["value"],
+            json!([255, 11])
+        );
+        assert!(
+            value["statement"]["object"]["value"]
+                .get("datatype")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn cold_nquads_page_conserves_named_and_default_graphs_in_serialized_report() {
         let text = "<s:one> <p:> \"typed\"^^<urn:type> <urn:graph> .\n_:same <p:> _:same _:same .\n<s:default> <p:> <o:> .\n";
         let (_directory, oracle, reader, file) =
@@ -1207,7 +1336,7 @@ mod tests {
         assert_eq!(report.qualification["rdf_statement_reads_complete"], true);
         assert_eq!(
             report.qualification["rdf_statement_scope"],
-            "selected_native_ntriples_or_nquads_files_only"
+            "selected_native_ntriples_nquads_or_nquads_dgraph_files_only"
         );
         let serialized = serde_json::to_value(&report).unwrap();
         let records = serialized["rdf_statement_reads"][0]["pages"][0]["statements"]
