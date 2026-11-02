@@ -32,6 +32,7 @@ mod cue;
 mod d;
 mod dockerfile;
 mod dockerfile_env;
+mod dql;
 mod eiffel;
 mod eiffel_formal_reads;
 mod elixir;
@@ -736,6 +737,7 @@ impl TreeSitterAnalyzer {
                 parsed_peak
                     .max(lowered.rust_owner_modeled_peak)
                     .max(lowered.rdf_modeled_peak)
+                    .max(lowered.dql_modeled_peak)
             }),
             usage,
         );
@@ -968,6 +970,7 @@ fn required_syntax_fact_count_from_output(
             || meson_bindings::required(fact)
             || cmake::required(fact)
             || ntriples::required(fact)
+            || dql::required(fact)
             || dockerfile::required(fact)
             || java_local_receivers::required(fact)
             || cpp_const_formals::required(fact)
@@ -1368,6 +1371,7 @@ struct LoweringBudget {
     records: usize,
     nested_items: usize,
     ntriples: ntriples::Plan,
+    dql: dql::Plan,
 }
 
 fn preflight_lowering_limits(
@@ -1438,6 +1442,7 @@ fn preflight_lowering_limits(
             cancellation,
         )?;
     let ntriples = ntriples::Plan::new(request, parse_output, cancellation)?;
+    let dql = dql::Plan::new(request, parse_output, cancellation)?;
     let mut entity_candidates = 0_usize;
     let mut occurrence_candidates = 0_usize;
     let mut lexical_relation_candidates = 0_usize;
@@ -1450,6 +1455,8 @@ fn preflight_lowering_limits(
     )?;
     let mut string_bytes = 0_usize;
     ntriples.account_strings(&mut string_bytes, limits)?;
+    dql.account_strings(&mut string_bytes, limits)?;
+    skipped_candidates = checked_add(skipped_candidates, usize::from(dql.gap.is_some()))?;
     skipped_candidates = checked_add(skipped_candidates, ntriples.gaps.len())?;
     for gap in &ntriples.gaps {
         account_string(&mut string_bytes, gap.detail.len(), limits)?;
@@ -1609,6 +1616,7 @@ fn preflight_lowering_limits(
             fact.kind(),
             SyntaxFactKind::Module | SyntaxFactKind::Declaration
         ) && !is_native_rdf_file_transport(fact, request.language().as_str())
+            && !dql::transport(fact, request.language().as_str())
         {
             skipped_candidates = checked_add(skipped_candidates, 1)?;
             account_string(
@@ -2295,7 +2303,10 @@ fn preflight_lowering_limits(
     }
     let required_extension_candidates = checked_add(
         checked_add(1, entity_candidates)?,
-        checked_add(vba_compilation_candidates, ntriples.statements.len())?,
+        checked_add(
+            checked_add(vba_compilation_candidates, ntriples.statements.len())?,
+            dql.len(),
+        )?,
     )?;
     require_resource_limit(
         ResourceKind::Records,
@@ -2355,7 +2366,10 @@ fn preflight_lowering_limits(
     let nested_items = checked_add(
         checked_add(
             checked_add(2, diagnostic_derivations)?,
-            checked_add(vba_compilation_candidates, ntriples.statements.len())?,
+            checked_add(
+                checked_add(vba_compilation_candidates, ntriples.statements.len())?,
+                dql.len(),
+            )?,
         )?,
         field_relation_derivations,
     )?;
@@ -2369,6 +2383,7 @@ fn preflight_lowering_limits(
         records: total_records,
         nested_items,
         ntriples,
+        dql,
     })
 }
 
@@ -2467,6 +2482,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         )?;
         let mut total_string_bytes = budget.string_bytes;
         let mut ntriples = std::mem::take(&mut budget.ntriples);
+        let mut dql = std::mem::take(&mut budget.dql);
         if self.request.language().as_str() == "markdown" {
             self.classic_fences = classic_fence_spans(self.coordinates.facts(), cancellation)?;
         }
@@ -4592,6 +4608,18 @@ impl<'context, 'source> Lowering<'context, 'source> {
             )?;
             if extensions.insert(envelope.id, envelope).is_some() {
                 return Err(provider_failure("ntriples-statement-identity-collision"));
+            }
+        }
+
+        if let Some(envelope) = dql.envelope(provenance_id)? {
+            ensure_extension_budget(
+                &envelope,
+                extensions.len(),
+                &mut extension_bytes,
+                self.request.limits().ir(),
+            )?;
+            if extensions.insert(envelope.id, envelope).is_some() {
+                return Err(provider_failure("dql-query-identity-collision"));
             }
         }
 
@@ -7375,6 +7403,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 fact.kind(),
                 SyntaxFactKind::Declaration | SyntaxFactKind::Module
             ) && !is_native_rdf_file_transport(fact, self.request.language().as_str())
+                && !dql::transport(fact, self.request.language().as_str())
             {
                 if let Some(gap) = structural_entity_classification_gap(fact) {
                     let region = self.skipped_region(
@@ -7817,6 +7846,17 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 insert_skipped_region(&mut skipped, gap, skipped_limit, cancellation)?;
             }
         }
+        if let Some(gap) = &dql.gap {
+            let region = skipped_region(
+                self.full_source,
+                gap.span,
+                FactDomain::Extensions,
+                SkippedRegionReason::UnsupportedConstruct,
+                gap.detail,
+                provenance_id,
+            )?;
+            insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
+        }
         for gap in &ntriples.gaps {
             cancellation.check()?;
             let region = skipped_region(
@@ -7920,6 +7960,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         Ok(LoweredOutput {
             rust_owner_modeled_peak,
             rdf_modeled_peak: ntriples.modeled_peak,
+            dql_modeled_peak: dql.modeled_peak,
             records,
             coverage_status,
             skipped_regions: stats.skipped_regions,
@@ -10445,6 +10486,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
 struct LoweredOutput {
     rust_owner_modeled_peak: usize,
     rdf_modeled_peak: usize,
+    dql_modeled_peak: usize,
     records: Vec<IrRecord>,
     coverage_status: CoverageStatus,
     skipped_regions: usize,
@@ -14780,7 +14822,8 @@ fn is_native_rdf_file_transport(fact: &SyntaxFact, language: &str) -> bool {
 
 // Only this lowering path owns the independent ordinary PHP admission plan.
 fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
-    if fact.syntax_kind().as_str().starts_with("ntriples.")
+    if fact.syntax_kind().as_str().starts_with("dql.")
+        || fact.syntax_kind().as_str().starts_with("ntriples.")
         || fact.syntax_kind().as_str().starts_with("nquads.")
         || fact.syntax_kind().as_str().starts_with("nquads-dgraph.")
     {

@@ -4710,3 +4710,6 @@ mod html_closing_tags;
 
 #[path = "analyzer_e2e/nushell.rs"]
 mod nushell;
+
+#[path = "analyzer_e2e/dql_native.rs"]
+mod dql_native;
