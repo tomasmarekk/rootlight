@@ -879,6 +879,11 @@ impl Reservation {
 #[path = "oracle_restore_preservation/tests.rs"]
 mod tests;
 
+#[cfg(test)]
+pub(super) fn with_resolution_undo_observation<T>(operation: impl FnOnce() -> T) -> (T, u64) {
+    tests::with_resolution_undo_observation(operation)
+}
+
 /// Commit the census after its matching document append has succeeded.
 /// Consuming both optional states releases the census borrow before slot updates.
 pub(super) fn commit_preview(preview: Option<OracleLayoutPreview<'_>>) {
@@ -910,6 +915,7 @@ impl FinalAdmission {
         ir_limits: &IrLimits,
         extensions: &ExtensionSupport,
         context: &GenerationContext<'_>,
+        cxx: &[rootlight_resolve::CxxContextInput<'_>],
         cancellation: &Cancellation,
         admission: &mut dyn FnMut(u64) -> Result<(), FirstSliceError>,
     ) -> Result<NormalizedIrDocument, FirstSliceError> {
@@ -951,12 +957,13 @@ impl FinalAdmission {
         #[cfg(test)]
         tests::observe_captured_undo(undo_bytes);
         // Ordinary admission excludes classic and native project owners.
-        let candidate = apply_bounded_resolution_with_native_projects(
+        let candidate = apply_bounded_resolution_with_cxx_context(
             document,
             limits,
             ResolverFactContext::new(content_hash(RESOLVER_BINARY_SEED)),
             &[],
             &[],
+            cxx,
             cancellation,
         )?;
         rootlight_ir::validate_ir_document(&candidate, ir_limits, extensions).map_err(|error| {

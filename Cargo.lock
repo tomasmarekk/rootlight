@@ -2263,6 +2263,9 @@ dependencies = [
  "rootlight-ids",
  "rootlight-ir",
  "rootlight-vba",
+ "tree-sitter",
+ "tree-sitter-cmake",
+ "tree-sitter-kotlin-ng",
 ]
 
 [[package]]

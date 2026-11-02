@@ -24,6 +24,13 @@ use crate::{
     engine::{CandidateIndex, ResolutionContextKey, ResolutionMemo, ResolutionWorkBudget},
 };
 
+#[derive(Default)]
+struct ResolutionSources<'source, 'input> {
+    classic: &'input [crate::ClassicProjectSource<'source>],
+    native: &'input [crate::NativeClassicProject],
+    cxx: &'input [crate::CxxContextInput<'source>],
+}
+
 impl ResolutionEngine {
     /// Applies semantic decisions to a normalized IR document.
     ///
@@ -152,8 +159,14 @@ impl ResolutionEngine {
         context: ResolverFactContext,
         cancellation: &Cancellation,
     ) -> Result<NormalizedIrDocument, ResolutionError> {
-        self.apply_document_with_work_selection(document, context, cancellation, false, &[], &[])
-            .map(|(document, _)| document)
+        self.apply_document_with_work_selection(
+            document,
+            context,
+            cancellation,
+            false,
+            ResolutionSources::default(),
+        )
+        .map(|(document, _)| document)
     }
 
     /// Applies as many semantic decisions as fit the operation-wide work limit.
@@ -175,7 +188,13 @@ impl ResolutionEngine {
         context: ResolverFactContext,
         cancellation: &Cancellation,
     ) -> Result<(NormalizedIrDocument, crate::ResolutionWorkEstimate), ResolutionError> {
-        self.apply_document_with_work_selection(document, context, cancellation, true, &[], &[])
+        self.apply_document_with_work_selection(
+            document,
+            context,
+            cancellation,
+            true,
+            ResolutionSources::default(),
+        )
     }
 
     /// Resolves native facts with exact retained classic BASIC project sources.
@@ -193,7 +212,16 @@ impl ResolutionEngine {
         sources: &[crate::ClassicProjectSource<'_>],
         cancellation: &Cancellation,
     ) -> Result<(NormalizedIrDocument, crate::ResolutionWorkEstimate), ResolutionError> {
-        self.apply_document_with_work_selection(document, context, cancellation, true, sources, &[])
+        self.apply_document_with_work_selection(
+            document,
+            context,
+            cancellation,
+            true,
+            ResolutionSources {
+                classic: sources,
+                ..Default::default()
+            },
+        )
     }
 
     /// Resolves classic project facts with additional host-verified native inventories.
@@ -218,8 +246,40 @@ impl ResolutionEngine {
             context,
             cancellation,
             true,
-            sources,
-            native,
+            ResolutionSources {
+                classic: sources,
+                native,
+                cxx: &[],
+            },
+        )
+    }
+
+    /// Authenticates retained C++ context in the same bounded resolution pass.
+    ///
+    /// Captured sources establish only their physical identity; unsupported
+    /// declarative context never promotes a target or invents include paths.
+    ///
+    /// # Errors
+    /// Returns stale-source, bounded-work, cancellation or ordinary application errors.
+    pub fn apply_document_bounded_with_cxx_context(
+        &self,
+        document: NormalizedIrDocument,
+        context: ResolverFactContext,
+        sources: &[crate::ClassicProjectSource<'_>],
+        native: &[crate::NativeClassicProject],
+        cxx: &[crate::CxxContextInput<'_>],
+        cancellation: &Cancellation,
+    ) -> Result<(NormalizedIrDocument, crate::ResolutionWorkEstimate), ResolutionError> {
+        self.apply_document_with_work_selection(
+            document,
+            context,
+            cancellation,
+            true,
+            ResolutionSources {
+                classic: sources,
+                native,
+                cxx,
+            },
         )
     }
 
@@ -229,9 +289,13 @@ impl ResolutionEngine {
         context: ResolverFactContext,
         cancellation: &Cancellation,
         bounded: bool,
-        sources: &[crate::ClassicProjectSource<'_>],
-        native: &[crate::NativeClassicProject],
+        inputs: ResolutionSources<'_, '_>,
     ) -> Result<(NormalizedIrDocument, crate::ResolutionWorkEstimate), ResolutionError> {
+        let ResolutionSources {
+            classic: sources,
+            native,
+            cxx,
+        } = inputs;
         cancellation.check()?;
         let ir_limits = IrLimits::default();
         validate_ir_document(&document, &ir_limits, &ExtensionSupport::default())
@@ -273,6 +337,30 @@ impl ResolutionEngine {
                 },
             ));
         }
+        lookup.cxx =
+            match crate::cxx::build(&lookup, &document.occurrences, cxx, &mut work, cancellation) {
+                Ok(index) => index,
+                Err(error) => {
+                    if let ResolutionError::WorkLimit { maximum } = error
+                        && bounded
+                    {
+                        drop(lookup);
+                        let document =
+                            canonicalize_ir_document(document, &ir_limits, &Default::default())
+                                .map_err(ResolutionError::InvalidDocument)?;
+                        return Ok((
+                            document,
+                            crate::ResolutionWorkEstimate {
+                                required: maximum
+                                    .checked_add(1)
+                                    .ok_or(ResolutionError::CountOverflow)?,
+                                limit: maximum,
+                            },
+                        ));
+                    }
+                    return Err(error);
+                }
+            };
         lookup.classic = match crate::classic::ClassicIndex::build(
             &lookup,
             &document.coverage_records,
@@ -2110,7 +2198,10 @@ fn build_provenance(
             .ok_or(ResolutionError::UnsupportedIdentityRemap)?
             .envelope
             .provenance
-    } else if decision.explanation.rule == ResolutionRule::GroovyStaticImport {
+    } else if matches!(
+        decision.explanation.rule,
+        ResolutionRule::GroovyStaticImport | ResolutionRule::CppWrittenInclude
+    ) {
         lookup
             .files
             .get(&occurrence.file)
@@ -2128,6 +2219,17 @@ fn build_provenance(
     let mut derivation_parents = Vec::new();
     let mut context_digests = vec![parent.build_context.digest()];
     let mut tier = parent.tier;
+
+    if decision.explanation.rule == ResolutionRule::CppWrittenInclude {
+        let proof = lookup
+            .cxx
+            .proof(occurrence)
+            .ok_or(ResolutionError::UnsupportedIdentityRemap)?;
+        sources.extend(proof.sources.iter().cloned());
+        sources.push(proof.definition.clone());
+        derivation_parents.push(FactRef::Fact(proof.definition_id));
+        derivation_parents.extend(proof.owners.iter().copied().map(FactRef::Entity));
+    }
 
     if decision.explanation.rule == ResolutionRule::RustDirectFunctionCall {
         let proof = lookup
@@ -2396,6 +2498,9 @@ fn build_provenance(
         ResolutionRule::GroovyTypeImport => "groovy-type-import-v1.indexed_snapshot",
         ResolutionRule::PerlPackageStorage => "perl-package-storage-v1.indexed_snapshot",
         ResolutionRule::RustDirectFunctionCall => "rust-direct-function-v1.written_module",
+        ResolutionRule::CppWrittenInclude => {
+            "cpp-written-include-v1.partial-indexed-namespace-no-compiler-overload-adl-preprocessor-sdk-closure"
+        }
         ResolutionRule::FSharpQualifiedModule => lookup
             .fsharp
             .rule(occurrence)

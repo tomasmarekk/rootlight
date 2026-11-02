@@ -1118,7 +1118,7 @@ const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/378";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/160";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/161";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/15";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/6";
@@ -11042,19 +11042,27 @@ impl FirstSliceService {
             } else {
                 Vec::new()
             };
+            let cxx_files = document.files.iter()
+                .filter(|file| rootlight_resolve::CxxContextInput::accepts(file))
+                .map(|file| file.id).collect::<BTreeSet<_>>();
+            let cxx_sources = if document.files.iter().any(|file| file.language == "cpp") {
+                retained_sources.iter().filter(|source| cxx_files.contains(&source.snapshot.file()))
+                    .map(|source| rootlight_resolve::CxxContextInput::new(source.snapshot.file(), source.snapshot.content()))
+                    .collect::<Vec<_>>()
+            } else { Vec::new() };
             let mut document = if native_unavailable.is_empty()
                 && !file_capacity.as_ref().is_some_and(|capacity| capacity.unavailable()) {
                 if let Some(restore) = &mut restore_final {
                     restore.resolve(document, resolution_limits, self.analysis_limits.ir(),
-                        &self.extensions, &restore_context, cancellation, &mut |bytes| {
+                        &self.extensions, &restore_context, &cxx_sources, cancellation, &mut |bytes| {
                             output_admission.admit_known_bytes(bytes, &mut memory_reservation,
                                 self.durable.is_some(), cancellation)
                         })?
                 } else {
-                    apply_bounded_resolution_with_native_projects(
+                    apply_bounded_resolution_with_cxx_context(
                         document, resolution_limits,
                         ResolverFactContext::new(content_hash(RESOLVER_BINARY_SEED)),
-                        &classic_sources, &derived.native_projects, cancellation,
+                        &classic_sources, &derived.native_projects, &cxx_sources, cancellation,
                     )?
                 }
             } else {
@@ -26257,6 +26265,7 @@ fn apply_bounded_resolution_with_classic_sources(
     )
 }
 
+#[cfg(test)]
 fn apply_bounded_resolution_with_native_projects(
     document: NormalizedIrDocument,
     limits: ResolutionLimits,
@@ -26265,13 +26274,34 @@ fn apply_bounded_resolution_with_native_projects(
     native: &[rootlight_resolve::NativeClassicProject],
     cancellation: &Cancellation,
 ) -> Result<NormalizedIrDocument, FirstSliceError> {
+    apply_bounded_resolution_with_cxx_context(
+        document,
+        limits,
+        context,
+        sources,
+        native,
+        &[],
+        cancellation,
+    )
+}
+
+fn apply_bounded_resolution_with_cxx_context(
+    document: NormalizedIrDocument,
+    limits: ResolutionLimits,
+    context: ResolverFactContext,
+    sources: &[rootlight_resolve::ClassicProjectSource<'_>],
+    native: &[rootlight_resolve::NativeClassicProject],
+    cxx: &[rootlight_resolve::CxxContextInput<'_>],
+    cancellation: &Cancellation,
+) -> Result<NormalizedIrDocument, FirstSliceError> {
     let engine = ResolutionEngine::new(limits);
     let (mut document, estimate) = engine
-        .apply_document_bounded_with_native_projects(
+        .apply_document_bounded_with_cxx_context(
             document,
             context,
             sources,
             native,
+            cxx,
             cancellation,
         )
         .map_err(|error| map_resolution_error(error, cancellation))?;
@@ -27348,6 +27378,7 @@ mod tests {
     mod cmake_patch;
     mod coffeescript_source_preservation;
     mod coq_source;
+    mod cpp_include_resolution;
     mod cpp_preprocessor;
     mod dockerfile_source_preservation;
     mod eiffel_text_reopen;

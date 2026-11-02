@@ -162,6 +162,9 @@ impl ResolutionEngine {
         if let Some(decision) = index.rust.resolve(occurrence) {
             return Ok(decision);
         }
+        if let Some(decision) = index.cxx.resolve(occurrence) {
+            return Ok(decision);
+        }
         if let Some(decision) = index.fsharp.resolve(occurrence) {
             return Ok(decision);
         }
@@ -752,6 +755,7 @@ impl ResolutionContextKey {
             || index.classic.proof(occurrence).is_some()
             || index.perl.eligible(occurrence)
             || index.rust.eligible(occurrence)
+            || index.cxx.proof(occurrence).is_some()
             || index.fsharp.eligible(occurrence)
             || index.groovy.proof(occurrence).is_some()
             || index.groovy.inherited_entry(occurrence).is_some()
@@ -909,6 +913,7 @@ pub(crate) struct CandidateIndex<'a> {
     pub(crate) groovy: crate::groovy::GroovyIndex<'a>,
     pub(crate) perl: crate::perl::PerlIndex<'a>,
     pub(crate) rust: crate::rust::RustIndex<'a>,
+    pub(crate) cxx: crate::cxx::CxxIndex,
     pub(crate) fsharp: crate::fsharp::FSharpIndex<'a>,
     by_name_hash: BTreeMap<ContentHash, Vec<IndexedCandidate<'a>>>,
     javascript_by_scope: BTreeMap<(ContentHash, FileId, ContainerRef), Vec<IndexedCandidate<'a>>>,
@@ -1041,6 +1046,7 @@ impl<'a> CandidateIndex<'a> {
                 extension_records,
                 cancellation,
             )?,
+            cxx: crate::cxx::CxxIndex::default(),
             by_name_hash,
             javascript_by_scope,
             entities,
@@ -1116,6 +1122,7 @@ impl<'a> CandidateIndex<'a> {
         if !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
             && (self.perl.eligible(occurrence)
                 || self.rust.eligible(occurrence)
+                || self.cxx.proof(occurrence).is_some()
                 || self.fsharp.eligible(occurrence)
                 || self.groovy.proof(occurrence).is_some()
                 || self.classic.proof(occurrence).is_some())

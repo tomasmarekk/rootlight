@@ -24,6 +24,18 @@ pub(super) fn observe_captured_undo(bytes: u64) {
     UNDO_CAPTURED.with(|captured| captured.set(bytes));
 }
 
+pub(super) fn with_resolution_undo_observation<T>(operation: impl FnOnce() -> T) -> (T, u64) {
+    struct Reset(u64);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            UNDO_CAPTURED.with(|captured| captured.set(self.0));
+        }
+    }
+    let _reset = Reset(UNDO_CAPTURED.with(|captured| captured.replace(0)));
+    let result = operation();
+    (result, UNDO_CAPTURED.with(Cell::get))
+}
+
 pub(super) fn admit_undo_additional(bytes: u64) -> Result<(), FirstSliceError> {
     let observed = UNDO_ADDITIONAL
         .with(Cell::get)
@@ -1092,6 +1104,7 @@ fn real_resolver_growth_above_restore_floor_keeps_exact_original_structural_fact
             &IrLimits::default(),
             &ExtensionSupport::default(),
             &context,
+            &[],
             &cancellation,
             &mut |bytes| {
                 unprofiled_charge += bytes;
@@ -1110,6 +1123,7 @@ fn real_resolver_growth_above_restore_floor_keeps_exact_original_structural_fact
                 &IrLimits::default(),
                 &ExtensionSupport::default(),
                 &context,
+                &[],
                 &cancellation,
                 &mut |bytes| {
                     charged += bytes;
@@ -1312,6 +1326,7 @@ fn real_resolver_growth_above_restore_floor_keeps_exact_original_structural_fact
                 &IrLimits::default(),
                 &ExtensionSupport::default(),
                 &context,
+                &[],
                 &cancellation,
                 &mut |_| Ok(()),
             )

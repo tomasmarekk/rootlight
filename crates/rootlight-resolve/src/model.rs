@@ -332,6 +332,8 @@ pub enum ResolutionRule {
     PerlPackageStorage,
     /// A producer proves an identifier call to one written same-module Rust function.
     RustDirectFunctionCall,
+    /// Literal includes and written project roots bind one indexed namespace function.
+    CppWrittenInclude,
     /// Native public F# module export in one source-declared project order.
     FSharpQualifiedModule,
     /// Lexical scope and file containment resolution.
@@ -360,6 +362,8 @@ pub enum ResolutionSignal {
     NativePackageStorage,
     /// Exact native lexical context selects a named Rust function definition.
     NativeDirectFunction,
+    /// Authenticated written include roots select a source-declared C++ function.
+    NativeWrittenInclude,
     /// The entity canonical-name hash matches the occurrence text hash.
     CanonicalNameHash,
     /// The entity presentation name matches an explicit alias spelling.
@@ -436,6 +440,8 @@ pub enum CompletenessAssumption {
     SourceDeclaredProjectOrder,
     /// The producer establishes a complete written Rust module context for this call.
     SourceDeclaredRustModule,
+    /// Written lookup covers indexed headers, not compiler, overload, ADL, preprocessor or SDK closure.
+    SourceDeclaredCppIncludeSnapshot,
     /// The normalized document passed common ownership, reference, and quota validation.
     ValidatedNormalizedDocument,
     /// All considered facts belong to one repository generation.
@@ -574,6 +580,8 @@ pub struct AppliedResolution {
 /// Semantic resolution failure.
 #[derive(Debug)]
 pub enum ResolutionError {
+    /// Retained C++ source or build-context bytes are stale or duplicated.
+    CxxSourceIdentity,
     /// Classic source bytes or native container identity are stale or duplicated.
     ClassicSourceIdentity,
     /// The normalized input failed validation.
@@ -600,6 +608,9 @@ pub enum ResolutionError {
 impl fmt::Display for ResolutionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::CxxSourceIdentity => {
+                f.write_str("C++ context source identity differs from the indexed generation")
+            }
             Self::ClassicSourceIdentity => {
                 f.write_str("classic project source identity differs from the indexed generation")
             }
@@ -626,6 +637,7 @@ impl Error for ResolutionError {
             // Cancellation is a transparent wrapper, not an extra cause layer.
             Self::Cancelled(error) => error.source(),
             Self::ClassicSourceIdentity
+            | Self::CxxSourceIdentity
             | Self::CountOverflow
             | Self::WorkLimit { .. }
             | Self::InvalidScore

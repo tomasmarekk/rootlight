@@ -7,6 +7,7 @@
 
 mod application;
 mod classic;
+mod cxx;
 mod engine;
 mod foreign;
 mod fsharp;
@@ -21,6 +22,7 @@ pub use classic::{
     NativeClassicProjectLocator, NativeClassicProjectReference, NativeClassicProjectReferenceKind,
     NativeClassicReference, NativeClassicReferenceField,
 };
+pub use cxx::CxxContextInput;
 pub use engine::ResolutionEngine;
 pub use foreign::{
     AppliedForeignLinks, ForeignLinkBatch, ForeignLinkDecision, ForeignLinkEngine,
