@@ -49,6 +49,7 @@ mod generation_admission_observation;
 #[cfg(test)]
 mod generation_text_observation;
 mod graphql_query_admission;
+mod gyp_source_files;
 #[cfg(test)]
 mod haskell_native_tests;
 #[cfg(test)]
@@ -1218,7 +1219,7 @@ const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
 const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/381";
-const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/163";
+const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/164";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/16";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/6";
@@ -11194,6 +11195,9 @@ impl FirstSliceService {
             // Project fallback may discard parser mappings. Container dependencies
             // are generation facts and must survive every structural fallback.
             derived.append_evidence(&mut document, self.analysis_limits.ir(), cancellation)?;
+            gyp_source_files::bind(&mut document, &retained_sources, self.analysis_limits.ir(), cancellation,
+                &mut |bytes| output_admission.admit_final_workspace(bytes, &mut memory_reservation,
+                    self.durable.is_some(), cancellation))?;
             if let Some(restore) = &mut restore_final {
                 document = restore.prepare_final(document, self.analysis_limits.ir(), &self.extensions,
                     &restore_context, cancellation, &mut |bytes| output_admission.admit_final_workspace(
@@ -27520,6 +27524,7 @@ mod tests {
     mod graphql_query_admission;
     mod groovy_static_import;
     mod gyp_native;
+    mod gyp_source_files;
     mod hare_source;
     mod haxe_routing_tests;
     mod haxe_source;
