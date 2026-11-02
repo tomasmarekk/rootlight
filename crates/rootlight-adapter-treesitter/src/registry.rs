@@ -119,6 +119,8 @@ pub enum GrammarFamily {
     Python,
     /// GYP literal build descriptions over the authenticated Python native AST.
     Gyp,
+    /// Native ABAP interface structure with explicit unmodeled-statement gaps.
+    Abap,
     /// Native Vento host declarations without embedded JavaScript evaluation.
     Vento,
     /// JavaScript and JSX grammar with typed-syntax tolerance.
@@ -400,6 +402,7 @@ impl GrammarRegistry {
             GrammarFamily::Rust,
             GrammarFamily::Python,
             GrammarFamily::Gyp,
+            GrammarFamily::Abap,
             GrammarFamily::Vento,
             GrammarFamily::JavaScript,
             GrammarFamily::Java,
@@ -617,6 +620,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Capnp => tree_sitter_capnp::LANGUAGE.into(),
         GrammarFamily::Rust => tree_sitter_rust::LANGUAGE.into(),
         GrammarFamily::Python | GrammarFamily::Gyp => tree_sitter_python::LANGUAGE.into(),
+        GrammarFamily::Abap => tree_sitter_abap::LANGUAGE.into(),
         GrammarFamily::Vento => tree_sitter_vento::LANGUAGE.into(),
         // TSX accepts ordinary JavaScript and JSX while retaining declarations
         // around type annotations that otherwise trigger file-wide recovery.
@@ -1563,6 +1567,15 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
                 "9609a2f92dbb7c32bc056fd8fb94e5478428f04496696aa08b048a9b66caf283",
             ),
         },
+        GrammarFamily::Abap => GrammarIdentity {
+            language_id: "abap",
+            grammar_version: "0.1.0",
+            source_package_sha256: "bf01b588cb9bb316f4659129e910f36889737d2ad105a163b5d0c7786cf4ceb2",
+            parser_sha256: "9a0a63e49ad1d51f22ff77aab77736fb715f9fb844e032f5b32ad0245a78219b",
+            scanner_sha256: Some(
+                "521500b65097deab41f8a29e387296e245f9ffa1167ad593105b8a75b454a087",
+            ),
+        },
         GrammarFamily::Vento => GrammarIdentity {
             language_id: "vento",
             grammar_version: "0.21.0",
@@ -1721,7 +1734,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 118);
+        assert_eq!(registry.descriptors().len(), 119);
         for family in [
             GrammarFamily::Dql,
             GrammarFamily::NTriples,
@@ -1775,6 +1788,7 @@ mod tests {
             GrammarFamily::Python,
             GrammarFamily::Gyp,
             GrammarFamily::JavaScript,
+            GrammarFamily::Abap,
             GrammarFamily::Vento,
             GrammarFamily::Java,
             GrammarFamily::Apex,

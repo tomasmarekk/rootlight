@@ -3,6 +3,7 @@
 //! Portable facts retain their common contract. Selected lexical proofs reconstruct
 //! native syntax independently before admitting new source bindings.
 
+mod abap;
 mod ada;
 mod agda;
 mod agda_rhs;
@@ -9629,10 +9630,13 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 qualified_length,
                 self.request.limits().ir().max_string_bytes,
             )?;
-            let authored_display_span = if (language == "vhdl" && definition.is_some())
+            let authored_display_span = if (matches!(language.as_str(), "abap" | "vhdl")
+                && definition.is_some())
                 || (language == "julia" && (name.is_empty() || name.chars().any(char::is_control)))
             {
-                let failure = if language == "vhdl" {
+                let failure = if language == "abap" {
+                    "abap-display-definition"
+                } else if language == "vhdl" {
                     "vhdl-display-definition"
                 } else {
                     "julia-display-definition"
@@ -10874,7 +10878,8 @@ fn materialize_entity(
     // overload identities. Haskell equations likewise retain one lexical binding.
     let signature_discriminator = if matches!(
         draft.language.as_str(),
-        "assembly"
+        "abap"
+            | "assembly"
             | "clojure"
             | "racket"
             | "cue"
@@ -11735,6 +11740,9 @@ fn wgsl_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
 }
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    if fact.syntax_kind().as_str().starts_with("abap.") {
+        return abap::gap(fact);
+    }
     if fact.syntax_kind().as_str().starts_with("vento.") {
         return vento::gap(fact);
     }
@@ -12381,6 +12389,9 @@ fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u
 }
 
 fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -> bool {
+    if language == "abap" {
+        return abap::written(kind, label);
+    }
     if language == "vento" {
         return vento::written(kind, label);
     }
@@ -12819,6 +12830,8 @@ fn written_source_identity(
         "rootlight.wesl-source-occurrence/1"
     } else if language == "wgsl" {
         "rootlight.wgsl-source-occurrence/1"
+    } else if language == "abap" {
+        "rootlight.abap-source-occurrence/1"
     } else if language == "hlsl" {
         "rootlight.hlsl-source-occurrence/1"
     } else {
@@ -13881,6 +13894,11 @@ fn test_source_path(path: &str) -> bool {
 }
 
 fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
+    if language == "abap" || fact.syntax_kind().as_str().starts_with("abap.") {
+        return language == "abap"
+            && fact.kind() == SyntaxFactKind::Module
+            && fact.syntax_kind().as_str() == "abap.file.module";
+    }
     if language == "vento" || fact.syntax_kind().as_str().starts_with("vento.") {
         return language == "vento"
             && fact.kind() == SyntaxFactKind::Module
@@ -14209,6 +14227,9 @@ fn is_haskell_type_annotation(fact: &SyntaxFact) -> bool {
 }
 
 fn is_signature_capture(fact: &SyntaxFact) -> bool {
+    if fact.syntax_kind().as_str().starts_with("abap.") {
+        return false;
+    }
     if fact.syntax_kind().as_str().starts_with("vento.") {
         return false;
     }

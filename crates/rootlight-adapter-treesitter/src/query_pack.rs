@@ -18,6 +18,7 @@ use crate::{
     registry::{language_for, native_family_for_source},
 };
 
+mod abap;
 mod ada;
 mod apex;
 mod assembly;
@@ -688,6 +689,17 @@ impl QueryPack {
                 "definition",
                 "module",
                 "root",
+                "signature",
+            ];
+        }
+        if family == GrammarFamily::Abap {
+            expected = vec![
+                "comment",
+                "declaration",
+                "definition",
+                "module",
+                "root",
+                "scope",
                 "signature",
             ];
         }
@@ -2045,6 +2057,19 @@ impl QueryPack {
                             input.source,
                             input.cancellation,
                         )?)?;
+                    }
+                    continue;
+                }
+                if input.family == GrammarFamily::Abap {
+                    if let Some(candidate) = abap::candidate(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.tree.root_node(),
+                        complete_file_input,
+                        input.cancellation,
+                    )? {
+                        retain(candidate)?;
                     }
                     continue;
                 }
@@ -4982,6 +5007,7 @@ fn candidate_for_capture(
             }
             GrammarFamily::Ron => return Err(query_failure("query-ron-data-call-unavailable")),
             GrammarFamily::Gyp => return Err(query_failure("query-gyp-data-call-unavailable")),
+            GrammarFamily::Abap => return Err(query_failure("query-abap-unmodeled-call")),
             GrammarFamily::Vento => {
                 return Err(query_failure("query-vento-javascript-call-unavailable"));
             }
@@ -6067,6 +6093,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
             (GrammarFamily::Gyp, include_str!("../queries/gyp.scm")),
+            (GrammarFamily::Abap, include_str!("../queries/abap.scm")),
             (GrammarFamily::Vento, include_str!("../queries/vento.scm")),
             (
                 GrammarFamily::JavaScript,
@@ -6537,7 +6564,7 @@ mod tests {
     #[test]
     fn reviewed_packs_compile_with_the_exact_closed_capture_contract() {
         let registry = QueryPackRegistry::audited().expect("reviewed packs compile");
-        assert_eq!(registry.len(), 118);
+        assert_eq!(registry.len(), 121);
         assert_eq!(registry.initialized_count(), registry.len());
 
         for family in [

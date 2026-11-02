@@ -262,6 +262,16 @@ pub fn structural_preprocessor_context_gaps(
 #[must_use]
 pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
+    if label.starts_with("abap.") {
+        return match (fact.kind(), label) {
+            (SyntaxFactKind::Module, "abap.file.module") => Some(EntityKind::Module),
+            (SyntaxFactKind::Declaration, "abap.interface.declaration") => {
+                Some(EntityKind::Interface)
+            }
+            (SyntaxFactKind::Declaration, "abap.method.declaration") => Some(EntityKind::Method),
+            _ => None,
+        };
+    }
     if label.starts_with("vento.") {
         return match (fact.kind(), label) {
             (SyntaxFactKind::Module, "vento.file.module") => Some(EntityKind::Module),
@@ -1487,6 +1497,18 @@ pub fn structural_captured_name_for_fact<'a>(
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
     let label = fact.syntax_kind().as_str();
+    if language == "abap" || label.starts_with("abap.") {
+        return (language == "abap"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && label == "abap.name.definition"
+            && text.len() <= maximum_bytes
+            && text
+                .as_bytes()
+                .first()
+                .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+            && text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+        .then(|| Cow::Owned(text.to_ascii_lowercase()));
+    }
     if language == "vento" || label.starts_with("vento.") {
         return (language == "vento"
             && fact.kind() == SyntaxFactKind::Occurrence

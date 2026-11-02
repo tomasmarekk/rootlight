@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "a2dba0467ed1642e39ba75faf2d5791391ec23934856644046854cc10e189c16";
+    "aa9a471db5643f91b801e101480ec1644a02f96c4f39c73baa8fce040d2aed33";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -221,7 +221,13 @@ const EXPECTED_PACKAGES: [(&str, &str, &str); 35] = [
     ),
 ];
 
-const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 73] = [
+const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 74] = [
+    (
+        "tree-sitter-abap",
+        "0.1.0",
+        "third_party/tree-sitter-abap-0.1.0",
+        "bf01b588cb9bb316f4659129e910f36889737d2ad105a163b5d0c7786cf4ceb2",
+    ),
     (
         "tree-sitter-vento",
         "0.21.0",
@@ -953,7 +959,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         ));
     }
     validate_runtime(&manifest.runtime)?;
-    if manifest.grammars.len() != 114 {
+    if manifest.grammars.len() != 115 {
         return Err(GrammarLockError::GrammarCount(manifest.grammars.len()));
     }
     let mut languages = BTreeSet::new();
@@ -990,6 +996,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "ron",
         "wesl",
         "erb",
+        "abap",
         "vento",
         "cuda",
         "idris",
@@ -1938,6 +1945,7 @@ mod tests {
     #[test]
     fn native_manifest_rejects_missing_or_extra_languages() {
         for language in [
+            "abap",
             "vento",
             "dql",
             "nquads-dgraph",
@@ -1956,7 +1964,7 @@ mod tests {
                 .retain(|grammar| grammar.language != language);
             assert!(matches!(
                 validate_manifest(&manifest),
-                Err(GrammarLockError::GrammarCount(113))
+                Err(GrammarLockError::GrammarCount(114))
             ));
         }
         let mut manifest: GrammarLock =

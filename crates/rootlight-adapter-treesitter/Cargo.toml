@@ -124,6 +124,7 @@ tree-sitter-kotlin-ng.workspace = true
 tree-sitter-lua.workspace = true
 tree-sitter-php.workspace = true
 tree-sitter-python.workspace = true
+tree-sitter-abap.workspace = true
 tree-sitter-vento.workspace = true
 tree-sitter-rust.workspace = true
 tree-sitter-ruby.workspace = true
