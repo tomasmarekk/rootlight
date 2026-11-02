@@ -582,10 +582,113 @@ fn cpp_written_calls_survive_ordinary_restore_noop_incremental_and_cold_rebind()
         .unwrap();
     assert_eq!(restored.logical_snapshot, initial.logical_snapshot);
     assert_original_calls(&reopened, &restored, IEQUALS);
+    let changed_context = CMAKE.replacen(
+        "          ${REACT_COMMON_DIR}\r\n",
+        "          ${CMAKE_CURRENT_SOURCE_DIR}/unavailable\r\n",
+        1,
+    );
+    assert_ne!(changed_context, CMAKE);
+    fs::write(repository.path().join(CMAKE_PATH), &changed_context).unwrap();
+    let context_changed = reopened
+        .index_repository_with_mode(
+            repository.path(),
+            FirstSliceIndexMode::Structural,
+            &deadline(),
+        )
+        .unwrap();
+    assert_ne!(context_changed.generation, restored.generation);
+    assert_eq!(
+        reopened
+            .incremental_evidence(context_changed.generation)
+            .unwrap()
+            .parsed_files(),
+        1,
+        "only the changed CMake parser unit is rebuilt"
+    );
+    {
+        let snapshot = reopened
+            .loaded_generation_snapshot(context_changed.generation)
+            .unwrap();
+        let document = snapshot.document();
+        for (path, expected) in [
+            (IEQUALS_PATH, IEQUALS),
+            (TO_LOWER_PATH, TO_LOWER),
+            (CMAKE_PATH, changed_context.as_str()),
+        ] {
+            let file = document
+                .files
+                .iter()
+                .find(|file| file.path == path)
+                .unwrap();
+            let source = file.evidence.source.as_ref().unwrap();
+            assert_eq!(file.generation, context_changed.generation);
+            assert_eq!(source.generation(), context_changed.generation);
+            assert_eq!(source.span().file(), file.id);
+            assert_eq!(source.content_hash(), content_hash(expected.as_bytes()));
+            let read = reopened
+                .source_read(
+                    context_changed.generation,
+                    vec![source.clone()],
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(read.data.chunks[0].bytes, expected.as_bytes());
+        }
+        let caller = document
+            .files
+            .iter()
+            .find(|file| file.path == IEQUALS_PATH)
+            .unwrap();
+        let mut calls: Vec<_> = document
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.file == caller.id
+                    && site.role == OccurrenceRole::CallSite
+                    && site.syntactic_text_hash == content_hash(b"toLower")
+            })
+            .collect();
+        calls.sort_by_key(|site| site.source.span().start_byte());
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| (
+                    call.source.span().start_byte(),
+                    call.source.span().end_byte()
+                ))
+                .collect::<Vec<_>>(),
+            [(556, 569), (573, 586)]
+        );
+        for call in calls {
+            assert_eq!(call.source.generation(), context_changed.generation);
+            assert_eq!(call.source.content_hash(), content_hash(IEQUALS.as_bytes()));
+            assert!(!matches!(call.target, OccurrenceTarget::Resolved { .. }));
+            assert!(!document.relations.iter().any(|relation| relation.subject
+                == RelationEndpoint::Occurrence(call.id)
+                && relation.predicate == RelationPredicate::Calls));
+        }
+        assert!(
+            !document
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "resolution-work-bounded")
+        );
+    }
+    fs::write(repository.path().join(CMAKE_PATH), CMAKE).unwrap();
+    let context_restored = reopened
+        .index_repository_with_mode(
+            repository.path(),
+            FirstSliceIndexMode::Structural,
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(context_restored.logical_snapshot, initial.logical_snapshot);
+    assert_original_calls(&reopened, &context_restored, IEQUALS);
     drop(reopened);
     let mut final_open =
         FirstSliceService::new_durable_with_policy(policy, paths.state_dir(), &deadline()).unwrap();
-    assert_original_calls(&final_open, &restored, IEQUALS);
+    assert_original_calls(&final_open, &context_restored, IEQUALS);
     assert_eq!(
         final_open
             .index_repository_with_mode(
@@ -595,6 +698,6 @@ fn cpp_written_calls_survive_ordinary_restore_noop_incremental_and_cold_rebind()
             )
             .unwrap()
             .generation,
-        restored.generation
+        context_restored.generation
     );
 }
