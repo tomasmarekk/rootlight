@@ -67,9 +67,12 @@ pub(super) fn build(
         }
     }
     let mut definitions = BTreeMap::new();
-    for occurrence in occurrences {
+    for &ordinal in &index.cxx_definitions {
         cancellation.check()?;
         work.consume()?;
+        let occurrence = occurrences
+            .get(ordinal)
+            .ok_or(ResolutionError::InvalidScore)?;
         if occurrence.role == OccurrenceRole::Definition
             && occurrence.syntax_kind == "cpp.identifier.definition"
             && let OccurrenceTarget::Resolved { symbol } = occurrence.target
@@ -81,9 +84,12 @@ pub(super) fn build(
         }
     }
     let mut result = CxxIndex::default();
-    for occurrence in occurrences {
+    for &ordinal in &index.cxx_calls {
         cancellation.check()?;
         work.consume()?;
+        let occurrence = occurrences
+            .get(ordinal)
+            .ok_or(ResolutionError::InvalidScore)?;
         if occurrence.role != OccurrenceRole::CallSite || occurrence.syntax_kind != "cpp.call.call"
         {
             continue;

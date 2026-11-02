@@ -15,11 +15,11 @@ use rootlight_ir::{
     RelationPredicate, RelationRecord, SourceRef, SourceSpan, validate_ir_document,
 };
 use rootlight_resolve::{
-    CompletenessAssumption, DEFAULT_CANDIDATE_LIMIT, DynamicCallCalibration, ExpectedResolution,
-    ForeignLinkEngine, ForeignLinkError, ForeignLinkInput, ForeignLinkLimits, ForeignLinkNamespace,
-    ForeignLinkOutcome, RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION, RejectionReason,
-    ResolutionError, ResolutionExpectation, ResolutionPenalty, ResolutionPolicy, ResolutionSignal,
-    ResolverFactContext, UnresolvedReason, evaluate_resolution_quality,
+    CompletenessAssumption, CxxContextInput, DEFAULT_CANDIDATE_LIMIT, DynamicCallCalibration,
+    ExpectedResolution, ForeignLinkEngine, ForeignLinkError, ForeignLinkInput, ForeignLinkLimits,
+    ForeignLinkNamespace, ForeignLinkOutcome, RESOLVER_PROVIDER_NAME, RESOLVER_PROVIDER_VERSION,
+    RejectionReason, ResolutionError, ResolutionExpectation, ResolutionPenalty, ResolutionPolicy,
+    ResolutionSignal, ResolverFactContext, UnresolvedReason, evaluate_resolution_quality,
 };
 use rootlight_resolve::{ResolutionEngine, ResolutionLimits, ResolutionOutcome};
 
@@ -2041,6 +2041,161 @@ fn resolver_work_limit_bounds_same_name_candidate_scans() {
     assert_eq!(total_count, 3);
     assert_eq!(completeness, CoverageStatus::Bounded);
     assert_eq!(exact.decisions[0].explanation.candidates.len(), 1);
+}
+
+#[test]
+fn cpp_preparation_does_not_charge_unrelated_language_occurrences() {
+    let mut fixture = Fixture::new();
+    let target = fixture.add_entity(
+        30,
+        "selected",
+        fixture.primary_file,
+        EntityKind::Function,
+        None,
+    );
+    fixture.add_occurrence(
+        31,
+        "selected",
+        fixture.primary_file,
+        OccurrenceRole::CallSite,
+        None,
+    );
+    let foreign = fixture.add_file(32, "src/foreign.js");
+    fixture.document.files.last_mut().unwrap().language = "javascript".to_owned();
+    // Reuse the complete retained route witnesses whose PUBLIC root is exercised
+    // by the native CMake tests; an empty CPP unit needs no invented declarations.
+    let sources = [
+        (
+            "packages/react-native/settings.gradle.kts",
+            "kotlin",
+            include_str!(
+                "../../rootlight-service/src/tests/fixtures/cpp_include_resolution/packages/react-native/settings.gradle.kts"
+            ),
+        ),
+        (
+            "packages/react-native/ReactAndroid/build.gradle.kts",
+            "kotlin",
+            include_str!(
+                "../../rootlight-service/src/tests/fixtures/cpp_include_resolution/packages/react-native/ReactAndroid/build.gradle.kts"
+            ),
+        ),
+        (
+            "packages/react-native/ReactAndroid/src/main/jni/CMakeLists.txt",
+            "cmake",
+            include_str!(
+                "../../rootlight-service/src/tests/fixtures/cpp_include_resolution/packages/react-native/ReactAndroid/src/main/jni/CMakeLists.txt"
+            ),
+        ),
+        (
+            "packages/react-native/ReactCommon/react/utils/CMakeLists.txt",
+            "cmake",
+            include_str!(
+                "../../rootlight-service/src/tests/fixtures/cpp_include_resolution/packages/react-native/ReactCommon/react/utils/CMakeLists.txt"
+            ),
+        ),
+        ("src/native.cpp", "cpp", "// native translation unit\n"),
+    ];
+    let mut inputs = Vec::new();
+    for (ordinal, (path, language, bytes)) in sources.iter().enumerate() {
+        let file = fixture.add_file(40 + u8::try_from(ordinal).unwrap(), path);
+        let source = source_ref(
+            fixture.document.repository,
+            fixture.document.generation,
+            file,
+            content_hash(bytes.as_bytes()),
+            0,
+            u64::try_from(bytes.len()).unwrap(),
+        );
+        let record = fixture.document.files.last_mut().unwrap();
+        record.language = (*language).to_owned();
+        record.content_hash = source.content_hash();
+        record.byte_length = source.span().end_byte();
+        record.evidence.source = Some(source);
+        inputs.push(CxxContextInput::new(file, bytes.as_bytes()));
+    }
+    fixture.validate();
+    let context = ResolverFactContext::new(fixture.content_hash);
+    let cancellation = Cancellation::new();
+    let (baseline, estimate) = ResolutionEngine::default()
+        .apply_document_bounded_with_cxx_context(
+            fixture.document.clone(),
+            context,
+            &[],
+            &[],
+            &inputs,
+            &cancellation,
+        )
+        .unwrap();
+    assert_eq!(
+        baseline
+            .occurrences
+            .iter()
+            .find(|site| site.file == fixture.primary_file
+                && site.role == OccurrenceRole::CallSite
+                && site.syntactic_text_hash == content_hash(b"selected"))
+            .unwrap()
+            .target,
+        OccurrenceTarget::Resolved { symbol: target }
+    );
+    assert!(estimate.required > 0 && estimate.required < estimate.limit);
+    let budget = estimate.required;
+    let unrelated = budget.checked_add(1).unwrap();
+    fixture.add_occurrence(
+        33,
+        "foreign_documentation",
+        foreign,
+        OccurrenceRole::Documentation,
+        None,
+    );
+    let template = fixture.document.occurrences.pop().unwrap();
+    for ordinal in 0..unrelated {
+        let mut occurrence = template.clone();
+        let mut identity = [0; 20];
+        identity[..8].copy_from_slice(&u64::try_from(ordinal).unwrap().to_le_bytes());
+        identity[19] = 197;
+        occurrence.id = FactId::from_bytes(identity);
+        occurrence.syntax_kind = "javascript.comment.documentation".to_owned();
+        fixture.document.occurrences.push(occurrence);
+    }
+    fixture.validate();
+    assert!(
+        unrelated > budget,
+        "the former first full-document pass alone exceeds this budget"
+    );
+    let engine = ResolutionEngine::new(
+        ResolutionLimits::with_work_limit(DEFAULT_CANDIDATE_LIMIT, budget).unwrap(),
+    );
+    let (document, observed) = engine
+        .apply_document_bounded_with_cxx_context(
+            fixture.document,
+            context,
+            &[],
+            &[],
+            &inputs,
+            &cancellation,
+        )
+        .unwrap();
+    assert_eq!(
+        observed.required, budget,
+        "foreign facts must not consume CPP preparation work"
+    );
+    assert_eq!(observed.limit, budget);
+    assert!(
+        document
+            .occurrences
+            .iter()
+            .any(|site| site.syntactic_text_hash == content_hash(b"selected")
+                && site.target == OccurrenceTarget::Resolved { symbol: target })
+    );
+    assert_eq!(
+        document
+            .occurrences
+            .iter()
+            .filter(|site| site.file == foreign && site.role == OccurrenceRole::Documentation)
+            .count(),
+        unrelated,
+        "unrelated facts remain conserved"
+    );
 }
 
 #[test]

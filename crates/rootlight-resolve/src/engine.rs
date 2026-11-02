@@ -914,6 +914,8 @@ pub(crate) struct CandidateIndex<'a> {
     pub(crate) perl: crate::perl::PerlIndex<'a>,
     pub(crate) rust: crate::rust::RustIndex<'a>,
     pub(crate) cxx: crate::cxx::CxxIndex,
+    pub(crate) cxx_definitions: Vec<usize>,
+    pub(crate) cxx_calls: Vec<usize>,
     pub(crate) fsharp: crate::fsharp::FSharpIndex<'a>,
     by_name_hash: BTreeMap<ContentHash, Vec<IndexedCandidate<'a>>>,
     javascript_by_scope: BTreeMap<(ContentHash, FileId, ContainerRef), Vec<IndexedCandidate<'a>>>,
@@ -1047,6 +1049,8 @@ impl<'a> CandidateIndex<'a> {
                 cancellation,
             )?,
             cxx: crate::cxx::CxxIndex::default(),
+            cxx_definitions: Vec::new(),
+            cxx_calls: Vec::new(),
             by_name_hash,
             javascript_by_scope,
             entities,
@@ -1056,8 +1060,25 @@ impl<'a> CandidateIndex<'a> {
             python_local_symbols: BTreeSet::new(),
             syntax_kinds: BTreeMap::new(),
         };
-        for occurrence in occurrence_records {
+        for (ordinal, occurrence) in occurrence_records.iter().enumerate() {
             cancellation.check()?;
+            // Reuse the shared dispatch pass; C++ preparation must not rescan
+            // unrelated language facts before bounded occurrence selection.
+            let cxx_destination = match (occurrence.role, occurrence.syntax_kind.as_str()) {
+                (OccurrenceRole::Definition, "cpp.identifier.definition") => {
+                    Some(&mut index.cxx_definitions)
+                }
+                (OccurrenceRole::CallSite, "cpp.call.call") => Some(&mut index.cxx_calls),
+                _ => None,
+            };
+            if let Some(destination) = cxx_destination
+                && index
+                    .files
+                    .get(&occurrence.file)
+                    .is_some_and(|file| file.language == "cpp")
+            {
+                destination.push(ordinal);
+            }
             if occurrence.role == OccurrenceRole::Definition
                 && occurrence.syntax_kind == "python.local_variable_name.definition"
                 && let OccurrenceTarget::Resolved { symbol } = occurrence.target
