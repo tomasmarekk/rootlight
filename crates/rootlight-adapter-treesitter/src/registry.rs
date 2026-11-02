@@ -117,6 +117,8 @@ pub enum GrammarFamily {
     Rust,
     /// Python grammar.
     Python,
+    /// GYP literal build descriptions over the authenticated Python native AST.
+    Gyp,
     /// JavaScript and JSX grammar with typed-syntax tolerance.
     JavaScript,
     /// Java grammar.
@@ -341,7 +343,7 @@ impl GrammarRegistry {
     /// Returns [`RegistryError`] if an SDK label is invalid or a linked grammar
     /// falls outside Tree-sitter's supported ABI interval.
     pub fn audited() -> Result<Self, RegistryError> {
-        let mut descriptors = Vec::with_capacity(116);
+        let mut descriptors = Vec::with_capacity(117);
         for family in [
             GrammarFamily::Dql,
             GrammarFamily::NTriples,
@@ -395,6 +397,7 @@ impl GrammarRegistry {
             GrammarFamily::Capnp,
             GrammarFamily::Rust,
             GrammarFamily::Python,
+            GrammarFamily::Gyp,
             GrammarFamily::JavaScript,
             GrammarFamily::Java,
             GrammarFamily::Apex,
@@ -610,7 +613,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Thrift => tree_sitter_thrift::LANGUAGE.into(),
         GrammarFamily::Capnp => tree_sitter_capnp::LANGUAGE.into(),
         GrammarFamily::Rust => tree_sitter_rust::LANGUAGE.into(),
-        GrammarFamily::Python => tree_sitter_python::LANGUAGE.into(),
+        GrammarFamily::Python | GrammarFamily::Gyp => tree_sitter_python::LANGUAGE.into(),
         // TSX accepts ordinary JavaScript and JSX while retaining declarations
         // around type annotations that otherwise trigger file-wide recovery.
         GrammarFamily::JavaScript => tree_sitter_typescript::LANGUAGE_TSX.into(),
@@ -1556,6 +1559,10 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
                 "9609a2f92dbb7c32bc056fd8fb94e5478428f04496696aa08b048a9b66caf283",
             ),
         },
+        GrammarFamily::Gyp => GrammarIdentity {
+            language_id: "gyp",
+            ..identity_for(GrammarFamily::Python)
+        },
         GrammarFamily::Python => GrammarIdentity {
             language_id: "python",
             grammar_version: "0.25.0",
@@ -1701,7 +1708,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 116);
+        assert_eq!(registry.descriptors().len(), 117);
         for family in [
             GrammarFamily::Dql,
             GrammarFamily::NTriples,
@@ -1753,6 +1760,7 @@ mod tests {
             GrammarFamily::Capnp,
             GrammarFamily::Rust,
             GrammarFamily::Python,
+            GrammarFamily::Gyp,
             GrammarFamily::JavaScript,
             GrammarFamily::Java,
             GrammarFamily::Apex,
@@ -1845,6 +1853,21 @@ mod tests {
         assert_eq!(json.parser_sha256(), jsonc.parser_sha256());
         assert_eq!(json.scanner_sha256(), jsonc.scanner_sha256());
         assert_eq!(json.abi_version(), jsonc.abi_version());
+    }
+
+    #[test]
+    fn gyp_is_a_distinct_profile_of_the_authenticated_python_native_grammar() {
+        let registry = GrammarRegistry::audited().unwrap();
+        let python = registry.get(GrammarFamily::Python).unwrap();
+        let gyp = registry.get(GrammarFamily::Gyp).unwrap();
+        assert_eq!(gyp.language().as_str(), "gyp");
+        assert_eq!(gyp.family(), GrammarFamily::Gyp);
+        assert_eq!(gyp.grammar_version(), python.grammar_version());
+        assert_eq!(gyp.grammar_source_sha256(), python.grammar_source_sha256());
+        assert_eq!(gyp.parser_sha256(), python.parser_sha256());
+        assert_eq!(gyp.scanner_sha256(), python.scanner_sha256());
+        assert_eq!(gyp.abi_version(), 15);
+        assert_eq!(gyp.abi_version(), python.abi_version());
     }
 
     #[test]

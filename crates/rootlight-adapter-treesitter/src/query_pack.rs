@@ -64,6 +64,7 @@ mod go_formal_reads;
 mod go_parameters;
 mod graphql;
 mod groovy;
+mod gyp;
 mod hare;
 mod haskell;
 mod haxe;
@@ -678,6 +679,16 @@ impl QueryPack {
         }
         if family.is_json() || matches!(family, GrammarFamily::Toml | GrammarFamily::Ron) {
             expected.retain(|name| !matches!(*name, "call" | "reference" | "signature" | "import"));
+        }
+        if family == GrammarFamily::Gyp {
+            expected = vec![
+                "comment",
+                "declaration",
+                "definition",
+                "module",
+                "root",
+                "signature",
+            ];
         }
         if matches!(family, GrammarFamily::Liquid | GrammarFamily::Handlebars) {
             expected.retain(|name| !matches!(*name, "call" | "import" | "scope" | "documentation"));
@@ -1309,6 +1320,10 @@ impl QueryPack {
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
                         && candidate.syntax == "ruby.formal_receiver")
+                    || (family == GrammarFamily::Gyp
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && candidate.syntax == "gyp.source_path")
                     || (family == GrammarFamily::C
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
@@ -1525,6 +1540,8 @@ impl QueryPack {
         let c_included_ranges = c_dialect.map(|_| input.tree.included_ranges());
         let complete_file_input = matches!(input.tree.included_ranges().as_slice(), [range]
             if range.start_byte == 0 && range.end_byte >= input.source.len());
+        let mut gyp_captures =
+            gyp::Captures::new(input.source, limits.captures.min(limits.body_nodes));
         let mut python_variables = python_variables::CaptureCache::new(
             input.source,
             limits.captures.min(limits.body_nodes),
@@ -2011,6 +2028,24 @@ impl QueryPack {
                             input.source,
                             input.cancellation,
                         )?)?;
+                    }
+                    continue;
+                }
+                if input.family == GrammarFamily::Gyp {
+                    let candidate = gyp_captures.candidate(
+                        capture.node,
+                        role,
+                        input.tree.root_node(),
+                        complete_file_input,
+                        input.cancellation,
+                    )?;
+                    if gyp_captures.exhausted() {
+                        refusal = Some(IdentityRefusal::helper(RefusalOrigin::GypCaptures));
+                        limit = Some(QueryLimit::Capture);
+                        break 'query;
+                    }
+                    if let Some(candidate) = candidate {
+                        retain(candidate)?;
                     }
                     continue;
                 }
@@ -4916,6 +4951,7 @@ fn candidate_for_capture(
                 return Err(query_failure("query-json-call-kind"));
             }
             GrammarFamily::Ron => return Err(query_failure("query-ron-data-call-unavailable")),
+            GrammarFamily::Gyp => return Err(query_failure("query-gyp-data-call-unavailable")),
             GrammarFamily::Toml => return Err(query_failure("query-toml-call-kind")),
             GrammarFamily::Yaml => return Err(query_failure("query-yaml-call-kind")),
             GrammarFamily::Html => return Err(query_failure("query-html-call-kind")),
@@ -5982,7 +6018,7 @@ impl QueryPackRegistry {
     }
 
     fn catalogue() -> Self {
-        let mut packs = Vec::with_capacity(113);
+        let mut packs = Vec::with_capacity(117);
         for (family, source) in [
             (
                 GrammarFamily::Clojure,
@@ -5997,6 +6033,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Capnp, include_str!("../queries/capnp.scm")),
             (GrammarFamily::Rust, include_str!("../queries/rust.scm")),
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
+            (GrammarFamily::Gyp, include_str!("../queries/gyp.scm")),
             (
                 GrammarFamily::JavaScript,
                 concat!(

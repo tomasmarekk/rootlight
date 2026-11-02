@@ -262,6 +262,15 @@ pub fn structural_preprocessor_context_gaps(
 #[must_use]
 pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
     let label = fact.syntax_kind().as_str();
+    if label.starts_with("gyp.") {
+        return match (fact.kind(), label) {
+            (SyntaxFactKind::Module, "gyp.file.module") => Some(EntityKind::Module),
+            (SyntaxFactKind::Declaration, "gyp.target.declaration") => {
+                Some(EntityKind::BuildTarget)
+            }
+            _ => None,
+        };
+    }
     if label.starts_with("sparql.") {
         return sparql::kind(fact);
     }
@@ -1463,6 +1472,17 @@ pub fn structural_captured_name_for_fact<'a>(
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
     let label = fact.syntax_kind().as_str();
+    if language == "gyp" || label.starts_with("gyp.") {
+        return (language == "gyp"
+            && label == "gyp.target_name.definition"
+            && fact.kind() == SyntaxFactKind::Occurrence
+            && !text.is_empty()
+            && text.len() <= maximum_bytes
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')))
+        .then_some(Cow::Borrowed(text));
+    }
     if language == "sparql" || label.starts_with("sparql.") {
         return (language == "sparql")
             .then(|| sparql::name(fact, text, maximum_bytes))
@@ -2646,6 +2666,48 @@ mod tests {
                 label
             )));
         }
+    }
+
+    #[test]
+    fn gyp_target_names_require_exact_gyp_labels_and_plain_bounded_spelling() {
+        use crate::SyntaxKindLabel;
+        use rootlight_ids::FileId;
+        use rootlight_ir::SourceSpan;
+        let span = SourceSpan::new(FileId::from_bytes([3; 20]), 0, 32).unwrap();
+        let fact = |kind, label| {
+            SyntaxFact::new(1, None, kind, span, 0, SyntaxKindLabel::new(label).unwrap())
+        };
+        assert_eq!(
+            structural_entity_kind(&fact(SyntaxFactKind::Module, "gyp.file.module")),
+            Some(EntityKind::Module)
+        );
+        assert_eq!(
+            structural_entity_kind(&fact(SyntaxFactKind::Declaration, "gyp.target.declaration")),
+            Some(EntityKind::BuildTarget)
+        );
+        assert_eq!(
+            structural_entity_kind(&fact(
+                SyntaxFactKind::Declaration,
+                "gyp.function.declaration"
+            )),
+            None
+        );
+        let definition = fact(SyntaxFactKind::Occurrence, "gyp.target_name.definition");
+        assert_eq!(
+            structural_captured_name_for_fact("gyp", &definition, "native-addon.v1", 64).as_deref(),
+            Some("native-addon.v1")
+        );
+        for text in [
+            "",
+            "'native'",
+            "<(native)",
+            "native/name",
+            "native\\x2dname",
+        ] {
+            assert!(structural_captured_name_for_fact("gyp", &definition, text, 64).is_none());
+        }
+        assert!(structural_captured_name_for_fact("gyp", &definition, "native", 5).is_none());
+        assert!(structural_captured_name_for_fact("python", &definition, "native", 64).is_none());
     }
 
     #[test]

@@ -1217,7 +1217,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/379";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/380";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/162";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/16";
@@ -7995,6 +7995,11 @@ impl FirstSliceService {
             let frontend_version = if descriptor.family() == GrammarFamily::JavaScript {
                 format!(
                     "tree-sitter-typescript-tsx-{}",
+                    descriptor.grammar_version()
+                )
+            } else if descriptor.family() == GrammarFamily::Gyp {
+                format!(
+                    "tree-sitter-python-{}-gyp-literal-1",
                     descriptor.grammar_version()
                 )
             } else if descriptor.family() == GrammarFamily::Haxe {
@@ -27514,6 +27519,7 @@ mod tests {
     mod gap_retention;
     mod graphql_query_admission;
     mod groovy_static_import;
+    mod gyp_native;
     mod hare_source;
     mod haxe_routing_tests;
     mod haxe_source;

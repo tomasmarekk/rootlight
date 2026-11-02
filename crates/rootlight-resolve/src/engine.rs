@@ -1618,6 +1618,12 @@ pub(crate) fn resolvable_occurrence(occurrence: &OccurrenceRecord) -> bool {
     {
         return false;
     }
+    // Literal GYP source paths do not denote same-spelled build-target symbols.
+    if occurrence.syntax_kind.starts_with("gyp.")
+        && !matches!(occurrence.target, OccurrenceTarget::Resolved { .. })
+    {
+        return false;
+    }
     // A refused native formal join cannot be repaired by matching another name.
     if matches!(
         occurrence.syntax_kind.as_str(),
@@ -3584,6 +3590,7 @@ mod scala_formal_source_tests {
             "python.module_function.reference",
             "scala.unproven_formal.reference",
             "c.formal_return.reference",
+            "gyp.source_path.reference",
         ] {
             let repository = RepositoryId::from_bytes([1; 16]);
             let generation = GenerationId::from_bytes([2; 20]);

@@ -38,11 +38,12 @@ fn cpp_cuda_pair_initializes_only_its_actual_native_query() {
 #[test]
 fn cold_catalogue_initializes_only_the_requested_factory() {
     let registry = QueryPackRegistry::catalogue();
-    assert_eq!(registry.len(), 104);
+    assert_eq!(registry.len(), 119);
     assert_eq!(registry.initialized_count(), 0);
     assert_eq!(registry.initialized_pattern_count(), 0);
     for family in [
         GrammarFamily::Python,
+        GrammarFamily::Gyp,
         GrammarFamily::TypeScript,
         GrammarFamily::Markdown,
     ] {
@@ -109,6 +110,12 @@ fn cold_catalogue_initializes_only_the_requested_factory() {
             .get()
             .is_none()
     );
+    let gyp = registry
+        .get_for_source(GrammarFamily::Gyp, "binding.gyp", &cancellation)
+        .unwrap();
+    assert_eq!(gyp.native_family, GrammarFamily::Gyp);
+    assert!(!std::ptr::eq(python, gyp));
+    assert_eq!(registry.initialized_count(), 4);
 }
 
 #[test]

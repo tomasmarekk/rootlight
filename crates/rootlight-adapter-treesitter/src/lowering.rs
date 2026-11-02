@@ -48,6 +48,7 @@ mod go_call_formals;
 mod go_calls;
 mod go_formal_reads;
 mod graphql;
+mod gyp;
 mod handlebars;
 mod hare;
 mod haskell_modules;
@@ -975,6 +976,7 @@ fn required_syntax_fact_count_from_output(
             || java_local_receivers::required(fact)
             || cpp_const_formals::required(fact)
             || c_formal_reads::certified_reference(fact)
+            || gyp::required(fact)
             || c_variables::required(fact)
             || ruby_bindings::required(fact)
             || ruby_formal_receivers::required(fact)
@@ -11731,6 +11733,9 @@ fn wgsl_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
 }
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    if fact.syntax_kind().as_str().starts_with("gyp.") {
+        return gyp::gap(fact);
+    }
     if matches!(
         fact.syntax_kind().as_str(),
         "powershell.formal_context.signature" | "powershell.unproven_formal.reference"
@@ -12371,6 +12376,9 @@ fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u
 }
 
 fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -> bool {
+    if language == "gyp" {
+        return gyp::written(kind, label);
+    }
     if language == "sparql" {
         return sparql::written(kind, label);
     }
@@ -12741,7 +12749,9 @@ fn written_source_identity(
     kind: &str,
     position: u64,
 ) -> [u8; 32] {
-    let context = if language == "sparql" {
+    let context = if language == "gyp" {
+        "rootlight.gyp-written-source-occurrence/1"
+    } else if language == "sparql" {
         "rootlight.sparql-written-source-occurrence/1"
     } else if language == "n3" {
         "rootlight.n3-written-source-occurrence/1"
@@ -13863,6 +13873,11 @@ fn test_source_path(path: &str) -> bool {
 }
 
 fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
+    if language == "gyp" || fact.syntax_kind().as_str().starts_with("gyp.") {
+        return language == "gyp"
+            && fact.kind() == SyntaxFactKind::Module
+            && fact.syntax_kind().as_str() == "gyp.file.module";
+    }
     if language == "trig" || fact.syntax_kind().as_str().starts_with("trig.") {
         return language == "trig"
             && fact.kind() == SyntaxFactKind::Module
@@ -14181,6 +14196,9 @@ fn is_haskell_type_annotation(fact: &SyntaxFact) -> bool {
 }
 
 fn is_signature_capture(fact: &SyntaxFact) -> bool {
+    if fact.syntax_kind().as_str().starts_with("gyp.") {
+        return false;
+    }
     if fact.syntax_kind().as_str().starts_with("ntriples.")
         || fact.syntax_kind().as_str().starts_with("nquads.")
         || fact.syntax_kind().as_str().starts_with("nquads-dgraph.")
@@ -14951,6 +14969,9 @@ fn structural_entity_kind_from_source(fact: &SyntaxFact, text: &str) -> Option<E
 }
 
 fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
+    if gyp::required(fact) {
+        return Some("gyp-written-source-path-resolution-unavailable");
+    }
     if fact.syntax_kind().as_str().starts_with("wesl.") {
         return Some("wesl-unproved-local-import-type-member-and-call-binding-unavailable");
     }

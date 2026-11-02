@@ -95,7 +95,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.101";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.102";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3075,6 +3075,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         suffixes: &[".jsonc"],
         aliases: &[],
         detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "gyp",
+        suffixes: &[".gyp", ".gypi"],
+        aliases: &[],
+        detectors: &["extension", "configuration"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
     },
@@ -7485,6 +7493,67 @@ max_source_file_bytes = 2097152
         let capability = language_capabilities()
             .iter()
             .find(|capability| capability.language == "jsonc")
+            .unwrap();
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(capability.analyzers, &["treesitter"]);
+    }
+
+    #[test]
+    fn gyp_discovery_preserves_physical_sources_and_configuration_precedence() {
+        let temporary = local_tempdir();
+        let contents = b"{'targets': [{'target_name': 'written'}]}\r\n";
+        write_fixture(&temporary, "binding.GYP", contents);
+        write_fixture(&temporary, "fragment.gypi", contents);
+        write_fixture(&temporary, "assigned.conf", contents);
+        write_fixture(&temporary, "overridden.gyp", b"def authored():\n    pass\n");
+        write_fixture(&temporary, "binary.gyp", b"\0binary");
+        let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+            source: rootlight_config::ConfigSource::User,
+            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nconf='gyp'\n[extensions.source-languages.data.paths]\n'overridden.gyp'='python'\n",
+        }]).unwrap();
+        let root = fixture_root(&temporary, b"gyp-discovery");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let manifest = discover(
+            &root,
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(manifest.inputs.len(), 4);
+        assert_eq!(manifest.exclusions.len(), 1);
+        assert_eq!(manifest.exclusions[0].path, "binary.gyp");
+        assert_eq!(manifest.exclusions[0].reason, ExclusionReason::Binary);
+        for (path, language, evidence) in [
+            ("binding.GYP", "gyp", LanguageEvidence::Extension),
+            ("fragment.gypi", "gyp", LanguageEvidence::Extension),
+            ("assigned.conf", "gyp", LanguageEvidence::Configuration),
+            ("overridden.gyp", "python", LanguageEvidence::Configuration),
+        ] {
+            let input = manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            assert!(
+                input
+                    .language_signals
+                    .iter()
+                    .any(|signal| signal.language == language && signal.evidence == evidence),
+                "{input:?}"
+            );
+            if language == "gyp" {
+                assert_eq!(input.content_hash, rootlight_ids::content_hash(contents));
+                assert_eq!(input.bytes, u64::try_from(contents.len()).unwrap());
+            }
+        }
+        assert_eq!(canonical_language("gyp"), Some("gyp"));
+        assert_eq!(extension_language("binding.gyp.bak"), None);
+        assert_ne!(extension_language("module.py"), Some("gyp"));
+        let capability = language_capabilities()
+            .iter()
+            .find(|entry| entry.language == "gyp")
             .unwrap();
         assert_eq!(capability.maximum_tier, "tier_d");
         assert_eq!(capability.analyzers, &["treesitter"]);

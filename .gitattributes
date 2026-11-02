@@ -1,4 +1,6 @@
 * text=auto eol=lf
+# Original GYP fixtures and licenses retain their authenticated physical bytes.
+/crates/rootlight-adapter-treesitter/tests/fixtures/gyp/** -text
 *.png binary
 *.jpg binary
 *.jpeg binary

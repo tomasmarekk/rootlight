@@ -101,6 +101,8 @@ mod glsl_native;
 mod graphql_native;
 #[path = "analyzer_e2e/groovy_native.rs"]
 mod groovy_native;
+#[path = "analyzer_e2e/gyp_native.rs"]
+mod gyp_native;
 #[path = "analyzer_e2e/handlebars.rs"]
 mod handlebars;
 #[path = "analyzer_e2e/hdl_native.rs"]
