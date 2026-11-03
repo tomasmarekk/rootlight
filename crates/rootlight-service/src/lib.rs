@@ -510,6 +510,22 @@ struct AnalysisProfileAggregateAppendRejection {
     resource: rootlight_ir::AggregateCapacityResource,
     observed: u64,
     limit: u64,
+    ir_string_bytes: Option<AnalysisProfileAggregateAppendStringBytes>,
+}
+
+// These are pre-deduplication IR UTF-8 charges, not source payload or heap bytes.
+// The remaining reservation can also include a required host floor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+struct AnalysisProfileAggregateAppendStringBytes {
+    target: usize,
+    incoming: usize,
+    reserved: Option<usize>,
+}
+
+struct AnalysisProfileAggregateAppendObservation {
+    file: Option<FileId>,
+    boundary: AnalysisProfileAggregateAppendBoundary,
+    ir_string_bytes: AnalysisProfileAggregateAppendStringBytes,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -578,6 +594,7 @@ fn profile_aggregate_append_rejection(
     error: &IrDocumentUsageError,
     file: Option<FileId>,
     boundary: AnalysisProfileAggregateAppendBoundary,
+    ir_string_bytes: Option<AnalysisProfileAggregateAppendStringBytes>,
 ) {
     with_analysis_profile(|profile| {
         let Some(cause) = AggregateCapacityFailure::from_combined_usage(error) else {
@@ -599,6 +616,8 @@ fn profile_aggregate_append_rejection(
                 resource,
                 observed,
                 limit,
+                ir_string_bytes: ir_string_bytes
+                    .filter(|_| resource == rootlight_ir::AggregateCapacityResource::StringBytes),
             });
     });
 }
@@ -23516,13 +23535,18 @@ fn append_usage_error_at_boundary(
     error: IrDocumentUsageError,
     aggregate_recovery: bool,
     cancellation: &Cancellation,
-    observation: Option<(Option<FileId>, AnalysisProfileAggregateAppendBoundary)>,
+    observation: Option<AnalysisProfileAggregateAppendObservation>,
 ) -> FirstSliceError {
     if let Some(cancelled) = current_cancellation(cancellation) {
         return cancelled;
     }
-    if let Some((file, boundary)) = observation {
-        profile_aggregate_append_rejection(&error, file, boundary);
+    if let Some(observation) = observation {
+        profile_aggregate_append_rejection(
+            &error,
+            observation.file,
+            observation.boundary,
+            Some(observation.ir_string_bytes),
+        );
     }
     if aggregate_recovery && let Some(cause) = AggregateCapacityFailure::from_combined_usage(&error)
     {
@@ -23717,10 +23741,15 @@ fn prepare_normalized_document_append(
                 error,
                 append_state.aggregate_recovery,
                 cancellation,
-                Some((
-                    profile_file,
-                    AnalysisProfileAggregateAppendBoundary::TargetAndSource,
-                )),
+                Some(AnalysisProfileAggregateAppendObservation {
+                    file: profile_file,
+                    boundary: AnalysisProfileAggregateAppendBoundary::TargetAndSource,
+                    ir_string_bytes: AnalysisProfileAggregateAppendStringBytes {
+                        target: target_usage.total_string_bytes(),
+                        incoming: source_usage.total_string_bytes(),
+                        reserved: None,
+                    },
+                }),
             )
         })?;
     if let Some(reserved) = reserved {
@@ -23732,10 +23761,15 @@ fn prepare_normalized_document_append(
                     error,
                     append_state.aggregate_recovery,
                     cancellation,
-                    Some((
-                        profile_file,
-                        AnalysisProfileAggregateAppendBoundary::TargetSourceAndReserved,
-                    )),
+                    Some(AnalysisProfileAggregateAppendObservation {
+                        file: profile_file,
+                        boundary: AnalysisProfileAggregateAppendBoundary::TargetSourceAndReserved,
+                        ir_string_bytes: AnalysisProfileAggregateAppendStringBytes {
+                            target: target_usage.total_string_bytes(),
+                            incoming: source_usage.total_string_bytes(),
+                            reserved: Some(reserved.total_string_bytes()),
+                        },
+                    }),
                 )
             })?;
     }
@@ -24568,6 +24602,7 @@ fn plan_optional_extensions_with_metadata_admission(
                 }),
                 profile_file,
                 AnalysisProfileAggregateAppendBoundary::TargetAndSource,
+                None,
             );
         }
         return Err(resource_limit(
@@ -24593,6 +24628,7 @@ fn plan_optional_extensions_with_metadata_admission(
                 ),
                 profile_file,
                 AnalysisProfileAggregateAppendBoundary::TargetAndSource,
+                None,
             );
         }
         #[cfg(test)]
@@ -68071,6 +68107,7 @@ mod tests {
                         resource: expected_resource,
                         observed: u64::try_from(observed).unwrap(),
                         limit: u64::try_from(observed - 1).unwrap(),
+                        ir_string_bytes: None,
                     })
                 );
                 let counts = &profile.aggregate_append_rejections.rejected_checks;

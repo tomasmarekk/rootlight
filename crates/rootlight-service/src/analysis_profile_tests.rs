@@ -1016,6 +1016,7 @@ fn append_summary_prefix_is_not_committed_after_later_quota_failure() {
             resource: rootlight_ir::AggregateCapacityResource::Coverage,
             observed: 2,
             limit: 1,
+            ir_string_bytes: None,
         })
     );
     assert_eq!(
@@ -1143,6 +1144,170 @@ fn aggregate_append_profile_distinguishes_reserved_ownership_from_source_usage()
 }
 
 #[test]
+fn aggregate_append_profile_reports_exact_string_quota_operands() {
+    let repository = RepositoryId::from_bytes([107; 16]);
+    let generation = GenerationId::from_bytes([108; 20]);
+    let document = |id: u8, path: &str| {
+        let mut document = NormalizedIrDocument::empty(repository, generation);
+        document.files.push(FileRecord {
+            id: FileId::from_bytes([id; 20]),
+            repository,
+            generation,
+            path: path.to_owned(),
+            path_locator: None,
+            content_hash: content_hash(b""),
+            byte_length: 0,
+            language: "rust".to_owned(),
+            encoding: "utf-8".to_owned(),
+            generated: false,
+            provenance: FactId::from_bytes([109; 20]),
+            evidence: FactEvidence {
+                source: None,
+                derivation: Vec::new(),
+            },
+        });
+        document
+    };
+    let target = document(110, "target/é.rs");
+    let incoming = document(111, "incoming-long/é.rs");
+    let floor = document(112, "reserved-host-extra/é.rs");
+    let limits = IrLimits::default();
+    let target_bytes = IrDocumentUsage::measure(&target, &limits)
+        .unwrap()
+        .total_string_bytes();
+    let incoming_bytes = IrDocumentUsage::measure(&incoming, &limits)
+        .unwrap()
+        .total_string_bytes();
+    let reserved = IrDocumentUsage::measure(&floor, &limits).unwrap();
+    let reserved_bytes = reserved.total_string_bytes();
+    assert!(target_bytes > 0 && incoming_bytes > 0 && reserved_bytes > 0);
+    assert_ne!(target_bytes, incoming_bytes);
+    assert_ne!(target_bytes, reserved_bytes);
+    assert_ne!(incoming_bytes, reserved_bytes);
+    for aggregate_recovery in [false, true] {
+        for invalidated in [false, true] {
+            for (with_reserved, reject_reserved) in [(false, false), (true, false), (true, true)] {
+                let mut state = DocumentAppendState::from_document(&target).unwrap();
+                state.aggregate_recovery = aggregate_recovery;
+                if invalidated {
+                    state.invalidate_usage();
+                }
+                let before_state = state.clone();
+                let before_target = target.clone();
+                let observed = target_bytes
+                    + incoming_bytes
+                    + if reject_reserved { reserved_bytes } else { 0 };
+                let mut limits = limits.clone();
+                limits.max_total_string_bytes = observed - 1;
+                let reservation = with_reserved.then_some(&reserved);
+                let cancellation = Cancellation::new();
+                let expected = prepare_normalized_document_append(
+                    &target,
+                    incoming.clone(),
+                    &limits,
+                    &state,
+                    &cancellation,
+                    None,
+                    reservation,
+                )
+                .err()
+                .unwrap();
+                let (actual, profile) = capture_first_slice_analysis_profile(|| {
+                    prepare_normalized_document_append(
+                        &target,
+                        incoming.clone(),
+                        &limits,
+                        &state,
+                        &cancellation,
+                        None,
+                        reservation,
+                    )
+                    .err()
+                    .unwrap()
+                });
+                assert_eq!(actual, expected);
+                assert_eq!(
+                    matches!(actual, FirstSliceError::AggregateCapacity(_)),
+                    aggregate_recovery
+                );
+                let first = profile.aggregate_append_rejections.first.unwrap();
+                assert_eq!(first.file, Some(incoming.files[0].id));
+                assert_eq!(
+                    first.boundary,
+                    if reject_reserved {
+                        AnalysisProfileAggregateAppendBoundary::TargetSourceAndReserved
+                    } else {
+                        AnalysisProfileAggregateAppendBoundary::TargetAndSource
+                    }
+                );
+                assert_eq!(
+                    first.resource,
+                    rootlight_ir::AggregateCapacityResource::StringBytes
+                );
+                assert_eq!(
+                    (first.observed, first.limit),
+                    (
+                        u64::try_from(observed).unwrap(),
+                        u64::try_from(observed - 1).unwrap()
+                    )
+                );
+                assert_eq!(
+                    first.ir_string_bytes,
+                    Some(AnalysisProfileAggregateAppendStringBytes {
+                        target: target_bytes,
+                        incoming: incoming_bytes,
+                        reserved: reject_reserved.then_some(reserved_bytes),
+                    })
+                );
+                let json = serde_json::to_value(&profile).unwrap();
+                assert_eq!(
+                    json["aggregate_append_rejections"]["first"]["ir_string_bytes"],
+                    serde_json::json!({
+                        "target": target_bytes,
+                        "incoming": incoming_bytes,
+                        "reserved": reject_reserved.then_some(reserved_bytes),
+                    })
+                );
+                assert_eq!(
+                    profile
+                        .aggregate_append_rejections
+                        .rejected_checks
+                        .string_bytes,
+                    1
+                );
+                assert!(profile.counts_complete);
+                assert_eq!(target, before_target);
+                assert_eq!(state, before_state);
+                limits.max_total_string_bytes =
+                    target_bytes + incoming_bytes + if with_reserved { reserved_bytes } else { 0 };
+                let (result, profile) = capture_first_slice_analysis_profile(|| {
+                    prepare_normalized_document_append(
+                        &target,
+                        incoming.clone(),
+                        &limits,
+                        &state,
+                        &cancellation,
+                        None,
+                        reservation,
+                    )
+                });
+                assert!(result.is_ok());
+                assert!(profile.aggregate_append_rejections.first.is_none());
+                assert_eq!(
+                    profile
+                        .aggregate_append_rejections
+                        .rejected_checks
+                        .string_bytes,
+                    0
+                );
+                assert_eq!(target, before_target);
+                assert_eq!(state, before_state);
+            }
+        }
+    }
+}
+
+#[test]
 fn aggregate_append_profile_excludes_incoming_only_failures_and_cancellation() {
     let incoming = metadata_pressure_document(vec![
         metadata_pressure_batch(100, true),
@@ -1186,10 +1351,15 @@ fn aggregate_append_profile_excludes_incoming_only_failures_and_cancellation() {
             error,
             true,
             &cancellation,
-            Some((
-                None,
-                AnalysisProfileAggregateAppendBoundary::TargetAndSource,
-            )),
+            Some(AnalysisProfileAggregateAppendObservation {
+                file: None,
+                boundary: AnalysisProfileAggregateAppendBoundary::TargetAndSource,
+                ir_string_bytes: AnalysisProfileAggregateAppendStringBytes {
+                    target: 1,
+                    incoming: 1,
+                    reserved: None,
+                },
+            }),
         )
     });
     assert_eq!(
@@ -1234,6 +1404,7 @@ fn aggregate_append_profile_keeps_first_witness_and_closed_resource_counts() {
                 }),
                 Some(FileId::from_bytes([99; 20])),
                 AnalysisProfileAggregateAppendBoundary::TargetSourceAndReserved,
+                None,
             );
         }
         for error in [
@@ -1262,6 +1433,7 @@ fn aggregate_append_profile_keeps_first_witness_and_closed_resource_counts() {
                 &IrDocumentUsageError::Validation(error),
                 None,
                 AnalysisProfileAggregateAppendBoundary::TargetAndSource,
+                None,
             );
         }
         for error in [
@@ -1287,6 +1459,7 @@ fn aggregate_append_profile_keeps_first_witness_and_closed_resource_counts() {
                 &error,
                 None,
                 AnalysisProfileAggregateAppendBoundary::TargetAndSource,
+                None,
             );
         }
     });
@@ -1302,6 +1475,7 @@ fn aggregate_append_profile_keeps_first_witness_and_closed_resource_counts() {
     );
     assert_eq!((first.observed, first.limit), (2, 1));
     let json = serde_json::to_value(&profile).unwrap();
+    assert!(json["aggregate_append_rejections"]["first"]["ir_string_bytes"].is_null());
     let counts = json["aggregate_append_rejections"]["rejected_checks"]
         .as_object()
         .unwrap();
