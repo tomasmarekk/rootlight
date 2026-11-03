@@ -428,11 +428,17 @@ mod tests {
                     continue;
                 }
                 if let Err(error) = super::super::candidate_for_capture(
-                    GrammarFamily::ObjectiveC,
+                    super::super::QueryInput {
+                        family: GrammarFamily::ObjectiveC,
+                        tree: &tree,
+                        source,
+                        cancellation: &cancellation,
+                        normalize_calls: false,
+                    },
                     *capture,
                     role,
-                    source,
-                    &cancellation,
+                    1_024,
+                    true,
                     &mut fsharp,
                     &mut plsql,
                 ) {
