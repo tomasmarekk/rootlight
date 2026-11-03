@@ -38,6 +38,10 @@ pub(super) fn gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
             FactDomain::Relations,
             "vbnet-method-contract-and-dispatch-bindings-unavailable",
         ),
+        "vbnet.external_contract.signature" => (
+            FactDomain::Relations,
+            "vbnet-external-abi-and-entry-point-bindings-unavailable",
+        ),
         "vbnet.parameter_contract.signature" => (
             FactDomain::Relations,
             "vbnet-parameter-type-and-default-bindings-unavailable",

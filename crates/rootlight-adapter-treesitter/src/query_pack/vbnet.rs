@@ -79,12 +79,16 @@ fn owner_chain(node: Node<'_>, source: &[u8], cancel: &Cancellation) -> Result<b
 }
 
 fn method(node: Node<'_>, source: &[u8], cancel: &Cancellation) -> Result<bool, AdapterError> {
-    if node.kind() != "method_declaration" || !named(node, source) {
+    if !matches!(node.kind(), "method_declaration" | "external_declaration") || !named(node, source)
+    {
         return Ok(false);
     }
     let Some(owner) = node.parent() else {
         return Ok(false);
     };
+    if node.kind() == "external_declaration" && owner.kind() == "interface_block" {
+        return Ok(false);
+    }
     Ok(matches!(
         owner.kind(),
         "class_block" | "module_block" | "structure_block" | "interface_block"
@@ -129,11 +133,10 @@ pub(super) fn candidate(
         {
             owner_kind(node).unwrap_or("vbnet.unmodeled_structure")
         }
-        (StructuralRole::Scope | StructuralRole::Declaration, "method_declaration")
-            if method(node, source, cancel)? =>
-        {
-            "vbnet.method"
-        }
+        (
+            StructuralRole::Scope | StructuralRole::Declaration,
+            "method_declaration" | "external_declaration",
+        ) if method(node, source, cancel)? => "vbnet.method",
         (StructuralRole::Declaration, "parameter") if parameter(node, source, cancel)? => {
             "vbnet.parameter"
         }
@@ -151,6 +154,9 @@ pub(super) fn candidate(
             }
         }
         (StructuralRole::Signature, "source_file") => return Ok(None),
+        (StructuralRole::Signature, "external_declaration") if method(node, source, cancel)? => {
+            "vbnet.external_contract"
+        }
         (StructuralRole::Signature, "method_declaration") if method(node, source, cancel)? => {
             "vbnet.method_contract"
         }

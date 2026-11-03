@@ -24,6 +24,7 @@ module.exports = grammar({
 
   
   conflicts: $ => [
+    [$.modifier, $.external_modifiers],
     [$.type, $.invocation],
     [$.type] ,
     [$.new_expression] ,
@@ -147,7 +148,7 @@ module.exports = grammar({
         field('implements', $.implements_clause)
       )),
       $._terminator,
-      repeat($._member_declaration),
+      repeat(choice($._member_declaration, $.external_declaration)),
       kw('End'), kw('Class'), optional($._terminator)
     )),
 
@@ -157,7 +158,7 @@ module.exports = grammar({
       kw('Module'),
       field('name', $.identifier),
       $._terminator,
-      repeat($._member_declaration),
+      repeat(choice($._member_declaration, $.external_declaration)),
       kw('End'), kw('Module'), optional($._terminator)
     )),
 
@@ -172,7 +173,7 @@ module.exports = grammar({
         field('implements', $.implements_clause)
       )),
       $._terminator,
-      repeat($._member_declaration),
+      repeat(choice($._member_declaration, $.external_declaration)),
       kw('End'), kw('Structure'), optional($._terminator)
     )),
 
@@ -272,7 +273,7 @@ module.exports = grammar({
 
     // Modifiers (public/private/etc.). Multiple modifiers can appear in sequence.
     modifiers: $ => repeat1($.modifier),
-    modifier: $ => token(choice(
+    modifier: $ => choice(
       kw('Public'), kw('Private'), kw('Protected'), kw('Friend'),
       kw('Shared'), kw('Shadows'), kw('Static'),
       kw('Overloads'), kw('Overrides'), kw('Overridable'), kw('NotOverridable'), kw('MustOverride'),
@@ -281,7 +282,7 @@ module.exports = grammar({
       kw('Default'),              // for default properties
       kw('ReadOnly'), kw('WriteOnly'),
       kw('WithEvents'), kw('Async'), kw('Iterator')
-    )),
+    ),
 
     // Type member declarations inside class/module/etc.
     _member_declaration: $ => choice(
@@ -430,6 +431,30 @@ module.exports = grammar({
         // Without body (e.g., abstract method in MustInherit class, or interface method):
         $._terminator
       )
+    ),
+
+    // External references have no body and are valid only in type/module members.
+    external_declaration: $ => seq(
+      optional(field('attributes', $.attribute_block)),
+      optional(field('modifiers', $.external_modifiers)),
+      kw('Declare'),
+      optional(field('charset', choice(kw('Ansi'), kw('Unicode'), kw('Auto')))),
+      choice(
+        seq(kw('Sub'), $._external_signature),
+        seq(kw('Function'), $._external_signature,
+          optional(seq(kw('As'), field('return_type', $.type))))
+      ),
+      $._terminator
+    ),
+    external_modifiers: $ => repeat1(choice(
+      kw('Public'), kw('Private'), kw('Protected'), kw('Friend'),
+      kw('Shadows'), kw('Overloads')
+    )),
+    _external_signature: $ => seq(
+      field('name', $.identifier),
+      kw('Lib'), field('library', $.string_literal),
+      optional(seq(kw('Alias'), field('entry_point', $.string_literal))),
+      optional(field('parameters', $.parameter_list))
     ),
 
     // Constructor (Sub New) declaration

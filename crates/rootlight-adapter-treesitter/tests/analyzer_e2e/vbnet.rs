@@ -14,14 +14,168 @@ const VBNET: LanguageCase = LanguageCase {
 };
 
 fn output(raw: &[u8]) -> AnalysisOutput {
+    output_for(VBNET, raw)
+}
+
+fn output_for(case: LanguageCase, raw: &[u8]) -> AnalysisOutput {
     let native = Arc::new(provider());
-    let analyzer = analyzer(&native, VBNET);
-    let fixture = Fixture::new(VBNET, raw);
+    let analyzer = analyzer(&native, case);
+    let fixture = Fixture::new(case, raw);
     analyze(
         &analyzer,
-        &request(&fixture.snapshot, &fixture.source, VBNET, &limits()),
+        &request(&fixture.snapshot, &fixture.source, case, &limits()),
         &ExtensionSupport::default(),
     )
+}
+
+#[test]
+fn vbnet_complete_original_external_methods_have_authored_names_and_owners() {
+    for (case, names, spans, method_count) in [
+        (
+            LanguageCase {
+                path: "native/MSAA.vb",
+                source: include_str!("../../../../tests/native-grammars/fixtures/vbnet/MSAA.vb"),
+                ..VBNET
+            },
+            ["MSAA", "AccessibleObjectFromWindow", "Hwnd"],
+            [(122, 126), (607, 633), (654, 658)],
+            7,
+        ),
+        (
+            LanguageCase {
+                path: "native/TaskbarStyle.vb",
+                source: include_str!(
+                    "../../../../tests/native-grammars/fixtures/vbnet/TaskbarStyle.vb"
+                ),
+                ..VBNET
+            },
+            ["TaskbarStyle", "EnumWindows", "Adress"],
+            [(149, 161), (292, 303), (324, 330)],
+            8,
+        ),
+    ] {
+        let output = output_for(case, case.source.as_bytes());
+        let doc = output.document();
+        assert_eq!(doc.files[0].language, "visual-basic-dotnet");
+        assert_eq!(
+            doc.entities
+                .iter()
+                .filter(|e| e.kind == EntityKind::Method)
+                .count(),
+            method_count
+        );
+        let mut selected = Vec::new();
+        for ((kind, name), (start, end)) in
+            [EntityKind::Class, EntityKind::Method, EntityKind::Parameter]
+                .into_iter()
+                .zip(names)
+                .zip(spans)
+        {
+            let entity = doc
+                .entities
+                .iter()
+                .find(|e| e.kind == kind && e.canonical_name == name)
+                .expect(name);
+            assert_eq!(entity.language, "visual-basic-dotnet");
+            assert_eq!(entity.display_name, name);
+            let definition = doc
+                .occurrences
+                .iter()
+                .find(|o| {
+                    o.role == OccurrenceRole::Definition
+                        && o.target == OccurrenceTarget::Resolved { symbol: entity.id }
+                })
+                .unwrap();
+            assert_eq!(
+                (
+                    definition.source.span().start_byte(),
+                    definition.source.span().end_byte()
+                ),
+                (start, end)
+            );
+            assert_eq!(
+                &case.source.as_bytes()
+                    [usize::try_from(start).unwrap()..usize::try_from(end).unwrap()],
+                name.as_bytes()
+            );
+            selected.push(entity);
+        }
+        for pair in selected.windows(2) {
+            assert_eq!(
+                pair[1].container,
+                Some(rootlight_ir::ContainerRef::Entity(pair[0].id))
+            );
+            assert!(
+                doc.relations
+                    .iter()
+                    .any(|r| r.predicate == RelationPredicate::Contains
+                        && r.subject == RelationEndpoint::Entity(pair[0].id)
+                        && r.object == RelationEndpoint::Entity(pair[1].id))
+            );
+        }
+        assert!(
+            doc.skipped_regions
+                .iter()
+                .any(|g| g.detail == "vbnet-external-abi-and-entry-point-bindings-unavailable")
+        );
+        assert!(
+            !doc.skipped_regions
+                .iter()
+                .any(|g| g.detail == "vbnet-complete-native-structure-unavailable")
+        );
+        assert!(
+            !doc.relations
+                .iter()
+                .any(|r| r.predicate == RelationPredicate::Calls)
+        );
+    }
+}
+
+#[test]
+fn vbnet_external_alias_literals_do_not_become_declared_names_or_bindings() {
+    let source = b"Class Api\nDeclare Unicode Function Written Lib \"Native.DLL\" Alias \"ExportW\"(ByRef VaLuE As Integer) As Integer\nEnd Class\n";
+    let result = output(source);
+    let folded = output(&source.to_ascii_lowercase());
+    for (kind, name) in [
+        (EntityKind::Method, "Written"),
+        (EntityKind::Parameter, "VaLuE"),
+    ] {
+        let entity = result
+            .document()
+            .entities
+            .iter()
+            .find(|e| e.kind == kind)
+            .unwrap();
+        let other = folded
+            .document()
+            .entities
+            .iter()
+            .find(|e| e.kind == kind)
+            .unwrap();
+        assert_eq!(entity.canonical_name, name);
+        assert_eq!(entity.id, other.id);
+    }
+    assert!(
+        !result
+            .document()
+            .entities
+            .iter()
+            .any(|e| matches!(e.canonical_name.as_str(), "Native.DLL" | "ExportW"))
+    );
+    for source in [
+        "Class Api\nDeclare Sub Broken Lib \"n.dll\"() As Integer\nEnd Class\n",
+        "#If False Then\nClass Api\nDeclare Sub Hidden Lib \"n.dll\"()\nEnd Class\n#End If\n",
+        "Interface Api\nDeclare Sub Broken Lib \"n.dll\"()\nEnd Interface\n",
+    ] {
+        let result = output(source.as_bytes());
+        assert!(
+            !result
+                .document()
+                .entities
+                .iter()
+                .any(|e| matches!(e.kind, EntityKind::Method | EntityKind::Parameter))
+        );
+    }
 }
 
 #[test]

@@ -9,3 +9,12 @@ The 4,124-byte fixture SHA-256 is
 The public source repository is `https://github.com/ChrisAnd1998/TaskbarX` at
 commit `4bc446c147c116c140689ca3de84a336bb29d338`, blob `e456311659768598b2c94611253099ae645ad8c1`.
 Physical fixture bytes equal the pinned Git blob.
+
+`MSAA.vb` and `TaskbarStyle.vb` retain complete originals from `TaskbarX/TaskbarX/`
+at the same upstream commit and under the same retained MIT notice. Physical
+bytes equal their pinned Git blobs:
+
+| File | Bytes | SHA-256 | Git blob |
+| --- | ---: | --- | --- |
+| `MSAA.vb` | 6774 | `f82ebbdd41da77017987610a4cee03de2e5852ac713a41213047df9b8ff48613` | `32d2af20951011588d62aebfaff5d3ee61f23f74` |
+| `TaskbarStyle.vb` | 10516 | `6a03fb32d2c0f0e55c74c1ee9cd7a592fe3c1326171381660b26aa2b34f8c048` | `6aadbc047a2c85f8752993dff186fac1ecba0108` |

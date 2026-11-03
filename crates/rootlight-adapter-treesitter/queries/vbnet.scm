@@ -13,6 +13,8 @@
 (enum_block name: (identifier) @definition)
 (method_declaration) @scope @declaration @signature
 (method_declaration name: (identifier) @definition)
+(external_declaration) @scope @declaration @signature
+(external_declaration name: (identifier) @definition)
 (parameter) @declaration @signature
 (parameter name: (identifier) @definition)
 (statement) @signature

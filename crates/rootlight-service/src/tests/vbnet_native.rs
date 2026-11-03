@@ -10,6 +10,221 @@ use rootlight_storage::{
 const ORIGINAL: &[u8] =
     include_bytes!("../../../../tests/native-grammars/fixtures/vbnet/TaskbarAnimate.vb");
 
+const MSAA: &[u8] = include_bytes!("../../../../tests/native-grammars/fixtures/vbnet/MSAA.vb");
+const STYLE: &[u8] =
+    include_bytes!("../../../../tests/native-grammars/fixtures/vbnet/TaskbarStyle.vb");
+
+fn assert_external_originals(
+    service: &FirstSliceService,
+    receipt: &FirstSliceIndexReceipt,
+    paths: &RuntimePaths,
+    msaa: &[u8],
+    external_name: &str,
+) -> Vec<SymbolId> {
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let doc = snapshot.document();
+    assert_eq!(doc.files.len(), 2);
+    assert_eq!(
+        doc.entities
+            .iter()
+            .filter(|e| e.kind == EntityKind::Method)
+            .count(),
+        15
+    );
+    let cancel = deadline();
+    let context = GenerationContext::new(&cancel, GenerationBudget::default());
+    let directory = paths
+        .state_dir()
+        .join("first-slice/repositories")
+        .join(receipt.repository.to_string())
+        .join(receipt.generation.to_string());
+    let reader = rootlight_catalog::OracleReader::open_in(&directory, &context).unwrap();
+    let mut identities = Vec::new();
+    for (raw, names, spans) in [
+        (
+            msaa,
+            ["MSAA", external_name, "Hwnd"],
+            [(122, 126), (607, 633), (654, 658)],
+        ),
+        (
+            STYLE,
+            ["TaskbarStyle", "EnumWindows", "Adress"],
+            [(149, 161), (292, 303), (324, 330)],
+        ),
+    ] {
+        let file = doc
+            .files
+            .iter()
+            .find(|file| file.content_hash == content_hash(raw))
+            .unwrap();
+        assert_eq!(file.language, "visual-basic-dotnet");
+        let read = service
+            .source_read(
+                receipt.generation,
+                vec![file.evidence.source.clone().unwrap()],
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks.len(), 1);
+        assert_eq!(read.data.chunks[0].bytes, raw);
+        let mut selected = Vec::new();
+        for ((kind, name), (start, end)) in
+            [EntityKind::Class, EntityKind::Method, EntityKind::Parameter]
+                .into_iter()
+                .zip(names)
+                .zip(spans)
+        {
+            let entity = doc
+                .entities
+                .iter()
+                .find(|entity| entity.kind == kind && entity.canonical_name == name)
+                .expect(name);
+            assert_eq!(entity.language, "visual-basic-dotnet");
+            assert_eq!(entity.display_name, name);
+            assert_eq!(
+                reader.entity(entity.id, &context).unwrap().as_ref(),
+                Some(entity)
+            );
+            let site = doc
+                .occurrences
+                .iter()
+                .find(|site| {
+                    site.role == OccurrenceRole::Definition
+                        && site.target == OccurrenceTarget::Resolved { symbol: entity.id }
+                })
+                .unwrap();
+            assert_eq!(
+                (
+                    site.source.span().start_byte(),
+                    site.source.span().end_byte()
+                ),
+                (start, end)
+            );
+            assert_eq!(site.source.content_hash(), content_hash(raw));
+            assert_eq!(
+                &raw[usize::try_from(start).unwrap()..usize::try_from(end).unwrap()],
+                name.as_bytes()
+            );
+            selected.push(entity);
+            identities.push(entity.id);
+        }
+        for pair in selected.windows(2) {
+            assert_eq!(
+                pair[1].container,
+                Some(rootlight_ir::ContainerRef::Entity(pair[0].id))
+            );
+            assert!(
+                doc.relations
+                    .iter()
+                    .any(|r| r.predicate == RelationPredicate::Contains
+                        && r.subject == RelationEndpoint::Entity(pair[0].id)
+                        && r.object == RelationEndpoint::Entity(pair[1].id))
+            );
+        }
+    }
+    assert_eq!(
+        doc.skipped_regions
+            .iter()
+            .filter(|gap| gap.detail == "vbnet-external-abi-and-entry-point-bindings-unavailable")
+            .count(),
+        2
+    );
+    assert!(
+        !doc.skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "vbnet-complete-native-structure-unavailable")
+    );
+    assert!(
+        !doc.relations
+            .iter()
+            .any(|r| r.predicate == RelationPredicate::Calls)
+    );
+    identities
+}
+
+#[test]
+fn vbnet_complete_external_originals_survive_noop_case_edit_restore_and_cold_reopen() {
+    let repository = durable_test_tempdir();
+    let path = repository.path().join("MSAA.vb");
+    fs::write(&path, MSAA).unwrap();
+    fs::write(repository.path().join("TaskbarStyle.vb"), STYLE).unwrap();
+    let storage = durable_test_tempdir();
+    let paths =
+        RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime")).unwrap();
+    paths.prepare_owner().unwrap();
+    let policy = FirstSliceStoragePolicy::resolve_user_config(None, 3).unwrap();
+    let mut service =
+        FirstSliceService::new_durable_with_policy(policy.clone(), paths.state_dir(), &deadline())
+            .unwrap();
+    let fresh = service
+        .index_repository(repository.path(), &deadline())
+        .unwrap();
+    let ids =
+        assert_external_originals(&service, &fresh, &paths, MSAA, "AccessibleObjectFromWindow");
+    assert_eq!(
+        service
+            .index_repository(repository.path(), &deadline())
+            .unwrap()
+            .generation,
+        fresh.generation
+    );
+    let changed = String::from_utf8(MSAA.to_vec())
+        .unwrap()
+        .replace("AccessibleObjectFromWindow", "ACCESSIBLEOBJECTFROMWINDOW");
+    fs::write(&path, changed.as_bytes()).unwrap();
+    let incremental = service
+        .index_repository(repository.path(), &deadline())
+        .unwrap();
+    assert_ne!(incremental.generation, fresh.generation);
+    assert_eq!(
+        assert_external_originals(
+            &service,
+            &incremental,
+            &paths,
+            changed.as_bytes(),
+            "ACCESSIBLEOBJECTFROMWINDOW"
+        ),
+        ids
+    );
+    fs::write(&path, MSAA).unwrap();
+    let restored = service
+        .index_repository(repository.path(), &deadline())
+        .unwrap();
+    assert_ne!(restored.generation, incremental.generation);
+    assert_eq!(
+        assert_external_originals(
+            &service,
+            &restored,
+            &paths,
+            MSAA,
+            "AccessibleObjectFromWindow"
+        ),
+        ids
+    );
+    drop(service);
+    let mut reopened =
+        FirstSliceService::new_durable_with_policy(policy, paths.state_dir(), &deadline()).unwrap();
+    assert_eq!(
+        assert_external_originals(
+            &reopened,
+            &restored,
+            &paths,
+            MSAA,
+            "AccessibleObjectFromWindow"
+        ),
+        ids
+    );
+    assert_eq!(
+        reopened
+            .index_repository(repository.path(), &deadline())
+            .unwrap()
+            .generation,
+        restored.generation
+    );
+}
+
 #[test]
 fn vbnet_configured_aliases_index_original_under_the_canonical_language() {
     let repository = durable_test_tempdir();
