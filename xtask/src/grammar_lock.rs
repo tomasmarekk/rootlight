@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "0c0e1df53c94bf80a65b742dd942d09409fb55562f50581365cc65ea4f0538ef";
+    "ad80d0a4596fcdc65a23f658049c9ec3cb90cd8f5f678d4cd8e1ad9479f242c4";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -1003,7 +1003,7 @@ fn validate_manifest(manifest: &GrammarLock) -> Result<(), GrammarLockError> {
         "wesl",
         "erb",
         "abap",
-        "vbnet",
+        "visual-basic-dotnet",
         "vento",
         "cuda",
         "idris",
@@ -1953,7 +1953,7 @@ mod tests {
     fn native_manifest_rejects_missing_or_extra_languages() {
         for language in [
             "abap",
-            "vbnet",
+            "visual-basic-dotnet",
             "vento",
             "dql",
             "nquads-dgraph",

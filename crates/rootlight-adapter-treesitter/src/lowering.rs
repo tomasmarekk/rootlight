@@ -9670,27 +9670,29 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 qualified_length,
                 self.request.limits().ir().max_string_bytes,
             )?;
-            let authored_display_span = if (matches!(language.as_str(), "abap" | "vbnet" | "vhdl")
-                && definition.is_some())
-                || (language == "julia" && (name.is_empty() || name.chars().any(char::is_control)))
-            {
-                let failure = if language == "abap" {
-                    "abap-display-definition"
-                } else if language == "vbnet" {
-                    "vbnet-display-definition"
-                } else if language == "vhdl" {
-                    "vhdl-display-definition"
+            let authored_display_span =
+                if (matches!(language.as_str(), "abap" | "visual-basic-dotnet" | "vhdl")
+                    && definition.is_some())
+                    || (language == "julia"
+                        && (name.is_empty() || name.chars().any(char::is_control)))
+                {
+                    let failure = if language == "abap" {
+                        "abap-display-definition"
+                    } else if language == "visual-basic-dotnet" {
+                        "vbnet-display-definition"
+                    } else if language == "vhdl" {
+                        "vhdl-display-definition"
+                    } else {
+                        "julia-display-definition"
+                    };
+                    let definition = definition.ok_or_else(|| provider_failure(failure))?;
+                    if !span_contains(fact.span(), definition.span()) {
+                        return Err(provider_failure(failure));
+                    }
+                    Some(definition.span())
                 } else {
-                    "julia-display-definition"
+                    None
                 };
-                let definition = definition.ok_or_else(|| provider_failure(failure))?;
-                if !span_contains(fact.span(), definition.span()) {
-                    return Err(provider_failure(failure));
-                }
-                Some(definition.span())
-            } else {
-                None
-            };
             let display_length = authored_display_span
                 .map(|span| self.text_for_span(span).map(str::len))
                 .transpose()?
@@ -10820,6 +10822,12 @@ fn materialize_entity(
     maximum_string_bytes: usize,
     materialized: &HashMap<u64, MaterializedEntity>,
 ) -> Result<MaterializedEntity, AdapterError> {
+    // VB.NET folds the private identity key while public names retain source spelling.
+    let qualified_declared_name = if draft.language == "visual-basic-dotnet" {
+        authored_display.unwrap_or(&draft.name)
+    } else {
+        &draft.name
+    };
     let (container, mut container_identity, qualified_name) =
         if let Some(address) = draft.data_identity {
             // Data addresses are independent of whether an implicit parent table
@@ -10879,7 +10887,7 @@ fn materialize_entity(
                     let mut qualified = String::with_capacity(qualified_length);
                     qualified.push_str(&parent.record.qualified_name);
                     qualified.push_str("::");
-                    qualified.push_str(&draft.name);
+                    qualified.push_str(qualified_declared_name);
                     (ContainerRef::Entity(parent.record.id), identity, qualified)
                 }
                 None => {
@@ -10892,10 +10900,10 @@ fn materialize_entity(
                             let mut qualified = String::with_capacity(draft.qualified_length);
                             qualified.push_str(prefix);
                             qualified.push_str("::");
-                            qualified.push_str(&draft.name);
+                            qualified.push_str(qualified_declared_name);
                             qualified
                         }
-                        None => draft.name.clone(),
+                        None => qualified_declared_name.to_owned(),
                     };
                     (ContainerRef::File(file), identity, qualified_name)
                 }
@@ -10921,7 +10929,7 @@ fn materialize_entity(
     let signature_discriminator = if matches!(
         draft.language.as_str(),
         "abap"
-            | "vbnet"
+            | "visual-basic-dotnet"
             | "assembly"
             | "clojure"
             | "racket"
@@ -10994,7 +11002,7 @@ fn materialize_entity(
         kind: draft.kind,
         language: draft.language.clone(),
         tier,
-        canonical_name: draft.name.clone(),
+        canonical_name: qualified_declared_name.to_owned(),
         display_name: if let Some(text) = authored_display {
             let mut display = String::new();
             display
@@ -11027,7 +11035,7 @@ fn materialize_entity(
         kind: draft.kind,
         container: record.container,
         container_identity,
-        declared_identity: draft.name.clone(),
+        declared_identity: record.canonical_name.clone(),
         signature_discriminator: signature_discriminator.to_vec(),
         build_context_discriminator: build_context.digest().as_bytes().to_vec(),
     };
@@ -12436,7 +12444,7 @@ fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u
 }
 
 fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -> bool {
-    if language == "vbnet" {
+    if language == "visual-basic-dotnet" {
         return vbnet::written(kind, label);
     }
     if language == "abap" {
@@ -12882,7 +12890,7 @@ fn written_source_identity(
         "rootlight.wgsl-source-occurrence/1"
     } else if language == "abap" {
         "rootlight.abap-source-occurrence/1"
-    } else if language == "vbnet" {
+    } else if language == "visual-basic-dotnet" {
         "rootlight.vbnet-source-occurrence/1"
     } else if language == "hlsl" {
         "rootlight.hlsl-source-occurrence/1"
@@ -13946,8 +13954,8 @@ fn test_source_path(path: &str) -> bool {
 }
 
 fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
-    if language == "vbnet" || fact.syntax_kind().as_str().starts_with("vbnet.") {
-        return language == "vbnet"
+    if language == "visual-basic-dotnet" || fact.syntax_kind().as_str().starts_with("vbnet.") {
+        return language == "visual-basic-dotnet"
             && fact.kind() == SyntaxFactKind::Module
             && fact.syntax_kind().as_str() == "vbnet.file.module";
     }

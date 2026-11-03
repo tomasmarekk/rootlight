@@ -4,7 +4,7 @@
 use super::*;
 
 const VBNET: LanguageCase = LanguageCase {
-    name: "vbnet",
+    name: "visual-basic-dotnet",
     path: "native/original.vb",
     frontend: "tree-sitter-vbnet-0.3.0",
     source: include_str!("../../../../tests/native-grammars/fixtures/vbnet/TaskbarAnimate.vb"),
@@ -30,7 +30,7 @@ fn original_vbnet_class_method_and_formals_have_exact_native_definitions() {
     assert_eq!(raw.len(), 4124);
     let output = output(raw);
     let doc = output.document();
-    assert_eq!(doc.files[0].language, "vbnet");
+    assert_eq!(doc.files[0].language, "visual-basic-dotnet");
     assert_eq!(doc.files[0].content_hash, content_hash(raw));
     let class = doc
         .entities
@@ -47,9 +47,9 @@ fn original_vbnet_class_method_and_formals_have_exact_native_definitions() {
         .iter()
         .find(|e| e.kind == EntityKind::Parameter && e.canonical_name == "hwnd")
         .expect("original native formal");
-    assert_eq!(class.canonical_name, "taskbaranimate");
+    assert_eq!(class.canonical_name, "TaskbarAnimate");
     assert_eq!(class.display_name, "TaskbarAnimate");
-    assert_eq!(method.canonical_name, "animate");
+    assert_eq!(method.canonical_name, "Animate");
     assert_eq!(method.display_name, "Animate");
     assert_eq!(
         doc.entities
@@ -58,11 +58,16 @@ fn original_vbnet_class_method_and_formals_have_exact_native_definitions() {
             .count(),
         8
     );
-    for (entity, (start, end)) in [
-        (class, (36, 50)),
-        (method, (122, 129)),
-        (formal, (136, 140)),
+    // These literals are the original corpus obligations, independent of registry IDs.
+    for (entity, kind, name, start, end) in [
+        (class, EntityKind::Class, "TaskbarAnimate", 36, 50),
+        (method, EntityKind::Method, "Animate", 122, 129),
+        (formal, EntityKind::Parameter, "hwnd", 136, 140),
     ] {
+        assert_eq!(entity.language, "visual-basic-dotnet");
+        assert_eq!(entity.kind, kind);
+        assert_eq!(entity.canonical_name, name);
+        assert_eq!(entity.display_name, name);
         let sites: Vec<_> = doc
             .occurrences
             .iter()
@@ -101,6 +106,19 @@ fn original_vbnet_class_method_and_formals_have_exact_native_definitions() {
             1
         );
     }
+    let ownership = doc
+        .relations
+        .iter()
+        .find(|relation| {
+            relation.predicate == RelationPredicate::Contains
+                && relation.subject == RelationEndpoint::Entity(class.id)
+                && relation.object == RelationEndpoint::Entity(method.id)
+        })
+        .unwrap();
+    let source = ownership.evidence.source.as_ref().unwrap();
+    assert!(source.span().start_byte() <= 122);
+    assert!(source.span().end_byte() >= 129);
+    assert_eq!(source.content_hash(), content_hash(raw));
     assert!(
         doc.skipped_regions
             .iter()
@@ -118,13 +136,14 @@ fn original_vbnet_class_method_and_formals_have_exact_native_definitions() {
 
 #[test]
 fn vbnet_case_identity_preserves_written_names_and_native_owners() {
-    let raw = b"pUbLiC cLaSs OwNeR\nPuBlIc SuB RuN(ByVal VaLuE As Integer)\nEnD SuB\nEnD ClAsS\n";
+    let raw = b"nAmEsPaCe OuTeR\npUbLiC cLaSs OwNeR\nPuBlIc SuB RuN(ByVal VaLuE As Integer)\nEnD SuB\nEnD ClAsS\nEnD nAmEsPaCe\n";
     let output = output(raw);
     let lower = self::output(&raw.to_ascii_lowercase());
-    for (kind, name, display) in [
-        (EntityKind::Class, "owner", "OwNeR"),
-        (EntityKind::Method, "run", "RuN"),
-        (EntityKind::Parameter, "value", "VaLuE"),
+    for (kind, display) in [
+        (EntityKind::Namespace, "OuTeR"),
+        (EntityKind::Class, "OwNeR"),
+        (EntityKind::Method, "RuN"),
+        (EntityKind::Parameter, "VaLuE"),
     ] {
         let entity = output
             .document()
@@ -139,9 +158,19 @@ fn vbnet_case_identity_preserves_written_names_and_native_owners() {
             .find(|e| e.kind == kind)
             .unwrap();
         assert_eq!(entity.id, equivalent.id);
-        assert_eq!(entity.canonical_name, name);
+        assert_eq!(entity.language, "visual-basic-dotnet");
+        assert_eq!(entity.canonical_name, display);
         assert_eq!(entity.display_name, display);
+        assert!(entity.qualified_name.ends_with(display));
+        assert_eq!(equivalent.canonical_name, display.to_ascii_lowercase());
     }
+    let formal = output
+        .document()
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Parameter)
+        .unwrap();
+    assert!(formal.qualified_name.ends_with("OuTeR::OwNeR::RuN::VaLuE"));
 }
 
 #[test]
@@ -251,7 +280,7 @@ fn vbnet_native_type_containers_keep_direct_method_and_formal_ownership() {
         let owner = doc
             .entities
             .iter()
-            .find(|e| e.kind == kind && e.canonical_name == "owner")
+            .find(|e| e.kind == kind && e.canonical_name == "Owner")
             .unwrap();
         let method = doc
             .entities
@@ -278,7 +307,7 @@ fn vbnet_native_type_containers_keep_direct_method_and_formal_ownership() {
             .document()
             .entities
             .iter()
-            .any(|e| e.kind == EntityKind::Enum && e.canonical_name == "owner")
+            .any(|e| e.kind == EntityKind::Enum && e.canonical_name == "Owner")
     );
     assert!(
         output

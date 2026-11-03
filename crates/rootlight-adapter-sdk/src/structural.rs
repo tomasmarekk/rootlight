@@ -1523,8 +1523,8 @@ pub fn structural_captured_name_for_fact<'a>(
     maximum_bytes: usize,
 ) -> Option<Cow<'a, str>> {
     let label = fact.syntax_kind().as_str();
-    if language == "vbnet" || label.starts_with("vbnet.") {
-        return (language == "vbnet"
+    if language == "visual-basic-dotnet" || label.starts_with("vbnet.") {
+        return (language == "visual-basic-dotnet"
             && fact.kind() == SyntaxFactKind::Occurrence
             && label == "vbnet.name.definition"
             && text.len() <= maximum_bytes

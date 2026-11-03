@@ -95,7 +95,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.105";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.106";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3095,9 +3095,9 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter"],
     },
     LanguageCapability {
-        language: "vbnet",
+        language: "visual-basic-dotnet",
         suffixes: &[".vb"],
-        aliases: &["visualbasicnet"],
+        aliases: &["vbnet", "visualbasicnet"],
         detectors: &["extension", "configuration"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
@@ -7546,10 +7546,18 @@ max_source_file_bytes = 2097152
             &Cancellation::new(),
         )
         .unwrap();
-        for (path, evidence) in [
-            ("TaskbarAnimate.vb", LanguageEvidence::Extension),
-            ("upper.VB", LanguageEvidence::Extension),
-            ("assigned.conf", LanguageEvidence::Configuration),
+        for (path, language, evidence) in [
+            (
+                "TaskbarAnimate.vb",
+                "visual-basic-dotnet",
+                LanguageEvidence::Extension,
+            ),
+            (
+                "upper.VB",
+                "visual-basic-dotnet",
+                LanguageEvidence::Extension,
+            ),
+            ("assigned.conf", "vbnet", LanguageEvidence::Configuration),
         ] {
             let input = manifest
                 .inputs
@@ -7560,7 +7568,9 @@ max_source_file_bytes = 2097152
                 input
                     .language_signals
                     .iter()
-                    .any(|signal| signal.language == "vbnet" && signal.evidence == evidence)
+                    .any(|signal| signal.language == language && signal.evidence == evidence),
+                "{path}: {:?}",
+                input.language_signals
             );
             assert_eq!(input.bytes, u64::try_from(original.len()).unwrap());
             assert_eq!(input.content_hash, rootlight_ids::content_hash(original));
@@ -7576,9 +7586,16 @@ max_source_file_bytes = 2097152
                 .iter()
                 .any(|s| s.language == "python" && s.evidence == LanguageEvidence::Configuration)
         );
-        assert_eq!(canonical_language("vbnet"), Some("vbnet"));
-        assert_eq!(canonical_language("visualbasicnet"), Some("vbnet"));
-        assert_eq!(extension_language("native.VB"), Some("vbnet"));
+        assert_eq!(
+            canonical_language("visual-basic-dotnet"),
+            Some("visual-basic-dotnet")
+        );
+        assert_eq!(canonical_language("vbnet"), Some("visual-basic-dotnet"));
+        assert_eq!(
+            canonical_language("visualbasicnet"),
+            Some("visual-basic-dotnet")
+        );
+        assert_eq!(extension_language("native.VB"), Some("visual-basic-dotnet"));
         for path in [
             "legacy.bas",
             "legacy.cls",
@@ -7586,11 +7603,15 @@ max_source_file_bytes = 2097152
             "backup.vb.bak",
             "project.vbproj",
         ] {
-            assert_ne!(extension_language(path), Some("vbnet"), "{path}");
+            assert_ne!(
+                extension_language(path),
+                Some("visual-basic-dotnet"),
+                "{path}"
+            );
         }
         let capability = language_capabilities()
             .iter()
-            .find(|c| c.language == "vbnet")
+            .find(|c| c.language == "visual-basic-dotnet")
             .unwrap();
         assert_eq!(capability.maximum_tier, "tier_d");
         assert_eq!(capability.analyzers, &["treesitter"]);

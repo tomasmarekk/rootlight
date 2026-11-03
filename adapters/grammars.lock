@@ -13126,7 +13126,7 @@ license_path = "LICENSE"
 "upstream/source.tar" = "4a08ba7a4c3762a9bda5a30e914ab6a0cda7d5c03a4b37e0249a39efbcd1a542"
 
 [[grammars]]
-language = "vbnet"
+language = "visual-basic-dotnet"
 crate_name = "tree-sitter-vbnet"
 crate_version = "0.3.0"
 vendored_source_sha256 = "f13c434e7175a4112f222eeb4aaaa1d0a33f2ce68a2e7aa831afae0bd2259a91"

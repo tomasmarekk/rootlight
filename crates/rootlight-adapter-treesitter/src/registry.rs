@@ -1581,7 +1581,7 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
             ),
         },
         GrammarFamily::VbNet => GrammarIdentity {
-            language_id: "vbnet",
+            language_id: "visual-basic-dotnet",
             grammar_version: "0.3.0",
             source_package_sha256: "f13c434e7175a4112f222eeb4aaaa1d0a33f2ce68a2e7aa831afae0bd2259a91",
             parser_sha256: "500a1a0f01d0a4f7ee0bcab589c8af0f8ea0e74db22763e30667b7cad9d690c3",

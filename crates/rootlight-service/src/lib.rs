@@ -1218,7 +1218,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/385";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/386";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/164";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/16";
@@ -20210,8 +20210,9 @@ fn detected_source_language(input: &ManifestInput) -> Option<&str> {
         .iter()
         .filter(|signal| signal.evidence == LanguageEvidence::Configuration);
     if let Some(language) = configured.next() {
-        return (!configured.any(|other| other.language != language.language))
-            .then_some(language.language.as_str());
+        // Discovery retains the configured spelling; effective bindings use canonical IDs.
+        let canonical = canonical_language(&language.language).unwrap_or(&language.language);
+        return (!configured.any(|other| other.language != language.language)).then_some(canonical);
     }
     if has_sparql_update_content_signal(input) {
         return sparql_update_content_language(input);

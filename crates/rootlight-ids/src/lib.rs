@@ -276,7 +276,7 @@ pub struct SymbolIdentity<'a> {
     pub semantic_kind: &'a str,
     /// Canonical container identity, empty only for roots.
     pub container_identity: &'a [u8],
-    /// Canonical declared identity.
+    /// Canonical declared identity; ordinary ASCII VB.NET names may retain authored casing.
     pub declared_identity: &'a str,
     /// Canonical overload or signature discriminator.
     pub signature_discriminator: &'a [u8],
@@ -331,6 +331,8 @@ pub fn derive_generation(input: GenerationIdentity) -> DerivedId<GenerationId> {
 }
 
 /// Derives a symbol identity from canonical language and build-context semantics.
+/// Ordinary ASCII identifiers in `visual-basic-dotnet` fold casing within the
+/// declared-name field; other languages and nonidentifier names retain exact bytes.
 #[must_use]
 pub fn derive_symbol(input: SymbolIdentity<'_>) -> DerivedId<SymbolId> {
     derive(
@@ -340,8 +342,23 @@ pub fn derive_symbol(input: SymbolIdentity<'_>) -> DerivedId<SymbolId> {
                 .bytes(input.repository.as_bytes())
                 .text(input.language)
                 .text(input.semantic_kind)
-                .bytes(input.container_identity)
-                .text(input.declared_identity)
+                .bytes(input.container_identity);
+            if input.language == "visual-basic-dotnet"
+                && input
+                    .declared_identity
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+                && input
+                    .declared_identity
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            {
+                encoder.ascii_casefolded_text(input.declared_identity);
+            } else {
+                encoder.text(input.declared_identity);
+            }
+            encoder
                 .bytes(input.signature_discriminator)
                 .bytes(input.build_context_discriminator);
         },
@@ -448,6 +465,13 @@ impl CanonicalEncoder {
 
     fn text(&mut self, value: &str) -> &mut Self {
         self.bytes(value.as_bytes())
+    }
+
+    fn ascii_casefolded_text(&mut self, value: &str) -> &mut Self {
+        self.length(value.len());
+        self.bytes
+            .extend(value.bytes().map(|byte| byte.to_ascii_lowercase()));
+        self
     }
 
     fn optional_bytes(&mut self, value: Option<&[u8]>) -> &mut Self {
@@ -1048,6 +1072,56 @@ mod tests {
             build_context_discriminator: b"",
         });
         assert_ne!(first.digest(), second.digest());
+    }
+
+    #[test]
+    fn vbnet_ordinary_names_fold_only_the_declared_identity() {
+        let repository = repository().id();
+        let identity = |language, name, container, signature| {
+            derive_symbol(SymbolIdentity {
+                repository,
+                language,
+                semantic_kind: "method",
+                container_identity: container,
+                declared_identity: name,
+                signature_discriminator: signature,
+                build_context_discriminator: b"context",
+            })
+        };
+        let canonical = identity("visual-basic-dotnet", "animate", b"owner", b"contract");
+        let authored = identity("visual-basic-dotnet", "AnImAtE", b"owner", b"contract");
+        assert_eq!(canonical.id(), authored.id());
+        assert_eq!(canonical.digest(), authored.digest());
+        for (lower, written) in [("_value42", "_VaLuE42"), ("second", "SECOND")] {
+            let distinct = identity("visual-basic-dotnet", lower, b"owner", b"contract");
+            assert_eq!(
+                distinct.digest(),
+                identity("visual-basic-dotnet", written, b"owner", b"contract").digest()
+            );
+            assert_ne!(distinct.id(), canonical.id());
+        }
+        for changed in [
+            identity(
+                "visual-basic-dotnet",
+                "animate_other",
+                b"owner",
+                b"contract",
+            ),
+            identity("visual-basic-dotnet", "animate", b"Owner", b"contract"),
+            identity("visual-basic-dotnet", "animate", b"owner", b"Contract"),
+        ] {
+            assert_ne!(canonical.digest(), changed.digest());
+        }
+        for language in ["rust", "vba", "vbnet"] {
+            assert_ne!(
+                identity(language, "animate", b"owner", b"").digest(),
+                identity(language, "AnImAtE", b"owner", b"").digest()
+            );
+        }
+        assert_ne!(
+            identity("visual-basic-dotnet", "Original.vb", b"owner", b"").digest(),
+            identity("visual-basic-dotnet", "original.vb", b"owner", b"").digest()
+        );
     }
 
     #[test]
