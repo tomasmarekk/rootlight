@@ -1,4 +1,4 @@
-//! Admit complete native owners and direct declarations without implementation inference.
+//! Admit complete native owners, declarations and implementation witnesses.
 
 use rootlight_adapter_sdk::AdapterError;
 use rootlight_cancel::Cancellation;
@@ -25,6 +25,40 @@ fn named_owner(node: Node<'_>, source: &[u8]) -> bool {
 
 fn declaration_owner(node: Node<'_>, source: &[u8]) -> bool {
     matches!(node.kind(), "interface_definition" | "class_definition") && named_owner(node, source)
+}
+
+fn implementation_class(node: Node<'_>, source: &[u8]) -> bool {
+    node.kind() == "class_implementation"
+        && named_owner(node, source)
+        && node
+            .parent()
+            .is_some_and(|parent| parent.kind() == "source_file")
+}
+
+fn implementation_method(node: Node<'_>, source: &[u8]) -> bool {
+    node.kind() == "method_implementation"
+        && named_owner(node, source)
+        && node
+            .parent()
+            .is_some_and(|parent| implementation_class(parent, source))
+}
+
+fn ordinary_implementation_header(
+    node: Node<'_>,
+    cancel: &Cancellation,
+) -> Result<bool, AdapterError> {
+    let Some(name) = node.child_by_field_name("name") else {
+        return Ok(false);
+    };
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        cancel.check()?;
+        if child.start_byte() < name.end_byte() || child.is_extra() {
+            continue;
+        }
+        return Ok(child.kind() == ".");
+    }
+    Ok(false)
 }
 
 fn declaration_kind(node: Node<'_>, source: &[u8]) -> Option<&'static str> {
@@ -102,6 +136,37 @@ pub(super) fn candidate(
             if named_owner(node, source) =>
         {
             "abap.class"
+        }
+        (StructuralRole::Scope | StructuralRole::Signature, "class_implementation")
+            if implementation_class(node, source) =>
+        {
+            "abap.class_implementation"
+        }
+        (StructuralRole::Scope, "method_implementation") if implementation_method(node, source) => {
+            "abap.method_implementation"
+        }
+        (StructuralRole::Signature, "method_implementation")
+            if implementation_method(node, source) =>
+        {
+            if ordinary_implementation_header(node, cancel)? {
+                "abap.method_implementation"
+            } else {
+                "abap.method_implementation_header"
+            }
+        }
+        (StructuralRole::Expression, "identifier")
+            if node
+                .parent()
+                .is_some_and(|owner| implementation_class(owner, source)) =>
+        {
+            "abap.class_implementation_name"
+        }
+        (StructuralRole::Reference, "identifier")
+            if node
+                .parent()
+                .is_some_and(|owner| implementation_method(owner, source)) =>
+        {
+            "abap.method_implementation_name"
         }
         (StructuralRole::Declaration, "method_entry") => {
             let Some(kind) = method_kind(node, source) else {

@@ -4692,6 +4692,22 @@ impl<'context, 'source> Lowering<'context, 'source> {
             None
         };
 
+        let abap_implementations = if self.request.language().as_str() == "abap"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() == CoverageStatus::Complete
+        {
+            abap::Implementations::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                self.source_text,
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?
+        } else {
+            abap::Implementations::default()
+        };
+
         for (index, fact) in self.coordinates.facts().iter().enumerate() {
             check_periodically(index, cancellation)?;
             let source = self.source_for_span(fact.span())?;
@@ -4872,8 +4888,9 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
             }
             for (domain, detail) in source_coverage_gaps(fact) {
-                if (entity_plan.perl.owned_functions.contains(&fact.local_id())
-                    && materialized.contains_key(&fact.local_id()))
+                if abap_implementations.covers(fact)
+                    || (entity_plan.perl.owned_functions.contains(&fact.local_id())
+                        && materialized.contains_key(&fact.local_id()))
                     || (detail == VBA_CONDITIONAL_EVALUATION_UNAVAILABLE
                         && match &vba_bindings {
                             Some(bindings) => {
@@ -5129,6 +5146,28 @@ impl<'context, 'source> Lowering<'context, 'source> {
                         provenance_id,
                     )?;
                     insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
+                }
+                continue;
+            }
+
+            if abap::implementation_name(fact) {
+                if let Some(binding) = abap_implementations.target(fact) {
+                    let mut occurrence = unresolved_occurrence(
+                        fact,
+                        OccurrenceRole::Definition,
+                        Some(binding.owner),
+                        provenance_id,
+                        syntax_confidence,
+                        source,
+                        self.text_for_span(fact.span())?,
+                    )?;
+                    occurrence.target = OccurrenceTarget::Resolved {
+                        symbol: binding.symbol,
+                    };
+                    occurrence.evidence = direct_evidence(self.source_for_span(binding.body)?);
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("treesitter-occurrence-identity"))?;
+                    occurrences.insert(occurrence.id, occurrence);
                 }
                 continue;
             }
@@ -11273,6 +11312,7 @@ fn source_coverage_gaps(fact: &SyntaxFact) -> impl Iterator<Item = (FactDomain, 
     };
     let surface = source_coverage_gap(fact)
         .into_iter()
+        .chain(abap::additional_gap(fact))
         .chain(jsx_identity_gaps.iter().copied())
         .chain(
             (fact.kind() == SyntaxFactKind::Signature
@@ -15595,6 +15635,9 @@ fn import_target_gap(fact: &SyntaxFact) -> &'static str {
 }
 
 fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
+    if abap::implementation_name(fact) {
+        return Some(OccurrenceRole::Definition);
+    }
     if fact.kind() == SyntaxFactKind::Occurrence
         && fact.syntax_kind().as_str() == "c.formal_return.reference"
     {

@@ -697,7 +697,9 @@ impl QueryPack {
                 "comment",
                 "declaration",
                 "definition",
+                "expression",
                 "module",
+                "reference",
                 "root",
                 "scope",
                 "signature",
@@ -946,6 +948,8 @@ impl QueryPack {
                 .any(|(quantifier, role)| {
                     *quantifier != CaptureQuantifier::Zero
                         && (role.belongs_to_identity_closure()
+                            || (family == GrammarFamily::Abap
+                                && matches!(role, StructuralRole::Expression | StructuralRole::Reference))
                             || (matches!(family, GrammarFamily::CMake | GrammarFamily::Dql | GrammarFamily::NTriples | GrammarFamily::NQuads | GrammarFamily::NQuadsDgraph)
                                 && *role == StructuralRole::Expression)
                             // Source-certified references remain mandatory even when
@@ -1183,6 +1187,13 @@ impl QueryPack {
                         && candidate.role == StructuralRole::Reference
                         && candidate.syntax == "html.closing_tag")
                     || candidate.role.belongs_to_identity_closure()
+                    || (family == GrammarFamily::Abap
+                        && candidate.required
+                        && matches!(
+                            (candidate.role, candidate.syntax),
+                            (StructuralRole::Expression, "abap.class_implementation_name")
+                                | (StructuralRole::Reference, "abap.method_implementation_name")
+                        ))
                     || (family == GrammarFamily::CMake
                         && candidate.required
                         && (candidate.role == StructuralRole::Expression

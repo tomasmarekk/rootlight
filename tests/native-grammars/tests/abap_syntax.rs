@@ -85,3 +85,46 @@ fn unmodeled_statement_stays_generic_and_incomplete_owner_keeps_error() {
         incomplete.root_node().to_sexp()
     );
 }
+
+#[test]
+fn original_method_implementations_have_native_owners_and_generic_statement_bodies() {
+    for (source, class_name, method_name) in [
+        (
+            include_bytes!("../fixtures/abap/zcl_abapgit_diff_factory.clas.abap").as_slice(),
+            b"zcl_abapgit_diff_factory".as_slice(),
+            b"get".as_slice(),
+        ),
+        (
+            include_bytes!("../fixtures/abap/zcl_abapgit_object_tabl.clas.testclasses.abap")
+                .as_slice(),
+            b"ltcl_ci".as_slice(),
+            b"run".as_slice(),
+        ),
+    ] {
+        let tree = parser().parse(source, None).unwrap();
+        let root = tree.root_node();
+        assert!(!root.has_error(), "{}", root.to_sexp());
+        let owners = nodes(root, "class_implementation");
+        assert_eq!(owners.len(), 1);
+        let owner = owners[0];
+        assert_eq!(owner.parent(), Some(root));
+        assert_eq!(
+            &source[owner.child_by_field_name("name").unwrap().byte_range()],
+            class_name
+        );
+        let methods = nodes(owner, "method_implementation");
+        assert_eq!(methods.len(), 1);
+        let method = methods[0];
+        assert_eq!(method.parent(), Some(owner));
+        let mut cursor = method.walk();
+        let names: Vec<_> = method.children_by_field_name("name", &mut cursor).collect();
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0].kind(), "identifier");
+        assert_eq!(&source[names[0].byte_range()], method_name);
+        assert!(method.child_by_field_name("body").is_none());
+        let statements = nodes(method, "statement");
+        assert_eq!(statements.len(), 1);
+        assert_eq!(statements[0].parent(), Some(method));
+        assert!(statements[0].child_by_field_name("function").is_none());
+    }
+}

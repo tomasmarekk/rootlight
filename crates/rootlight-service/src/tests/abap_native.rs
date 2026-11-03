@@ -40,7 +40,7 @@ fn native_abap_class_owners_survive_reopen_without_implementation_duplicates() {
         paths.prepare_owner().unwrap();
         fs::write(repository.path().join("class.abap"), raw).unwrap();
         let policy = FirstSliceStoragePolicy::resolve_user_config(None, 3).unwrap();
-        let assert_class = |service: &FirstSliceService, receipt: &FirstSliceIndexReceipt| {
+        let assert_class = |service: &FirstSliceService, receipt: &FirstSliceIndexReceipt, raw: &[u8]| {
             let snapshot = service
                 .loaded_generation_snapshot(receipt.generation)
                 .unwrap();
@@ -87,18 +87,27 @@ fn native_abap_class_owners_survive_reopen_without_implementation_duplicates() {
                             && site.target == OccurrenceTarget::Resolved { symbol: entity.id }
                     })
                     .collect();
-                assert_eq!(sites.len(), 1, "implementation must not duplicate its declaration");
-                let site = sites[0];
-                let span = site.source.span();
-                assert_eq!(site.source.content_hash(), content_hash(raw));
-                assert_eq!(
-                    raw.get(
-                        usize::try_from(span.start_byte()).unwrap()
-                            ..usize::try_from(span.end_byte()).unwrap()
-                    ),
-                    Some(entity.display_name.as_bytes())
-                );
-                assert_eq!(site.syntactic_text_hash, content_hash(entity.display_name.as_bytes()));
+                assert_eq!(sites.len(), if entity.kind == EntityKind::Method { 2 } else { 1 });
+                for site in sites {
+                    let span = site.source.span();
+                    assert_eq!(site.source.content_hash(), content_hash(raw));
+                    assert_eq!(
+                        raw.get(
+                            usize::try_from(span.start_byte()).unwrap()
+                                ..usize::try_from(span.end_byte()).unwrap()
+                        ),
+                        Some(entity.display_name.as_bytes())
+                    );
+                    assert_eq!(site.syntactic_text_hash, content_hash(entity.display_name.as_bytes()));
+                    if site.syntax_kind == "abap.method_implementation_name.reference" {
+                        assert_eq!(site.enclosing, Some(class.id));
+                        let evidence = site.evidence.source.as_ref().unwrap();
+                        let start = raw.windows(7).position(|part| part == b"METHOD ").unwrap();
+                        let end = raw.windows(10).position(|part| part == b"ENDMETHOD.").unwrap() + 10;
+                        assert_eq!((evidence.span().start_byte(), evidence.span().end_byte()), (u64::try_from(start).unwrap(), u64::try_from(end).unwrap()));
+                        assert_eq!(evidence.content_hash(), content_hash(raw));
+                    }
+                }
             }
             let relations: Vec<_> = doc
                 .relations
@@ -139,6 +148,20 @@ fn native_abap_class_owners_survive_reopen_without_implementation_duplicates() {
             for entity in [class, method] {
                 assert_eq!(reader.entity(entity.id, &context).unwrap().as_ref(), Some(entity));
             }
+            let mut cold = Vec::new();
+            let mut after = None;
+            loop {
+                let request = OccurrenceReadRequest::new(file.id, GenerationReadLimit::new(1).unwrap());
+                let request = after.map_or(request, |cursor| request.with_after(cursor));
+                let page = reader.occurrences(&request, &context).unwrap();
+                cold.extend_from_slice(page.items());
+                let Some(next) = page.next_cursor() else { break };
+                after = Some(next);
+            }
+            assert_eq!(cold.len(), 3);
+            for site in cold {
+                assert_eq!(doc.occurrences.iter().find(|expected| expected.id == site.id), Some(&site));
+            }
             (class.id, method.id)
         };
         let mut service =
@@ -147,7 +170,7 @@ fn native_abap_class_owners_survive_reopen_without_implementation_duplicates() {
         let fresh = service
             .index_repository(repository.path(), &deadline())
             .unwrap();
-        let identities = assert_class(&service, &fresh);
+        let identities = assert_class(&service, &fresh, raw);
         assert_eq!(
             service
                 .index_repository(repository.path(), &deadline())
@@ -155,16 +178,28 @@ fn native_abap_class_owners_survive_reopen_without_implementation_duplicates() {
                 .generation,
             fresh.generation
         );
+        let changed = std::str::from_utf8(raw).unwrap().replace(
+            &format!("METHOD {method_name}."),
+            &format!("METHOD {method_name}.\n    WRITE 'changed'."),
+        );
+        fs::write(repository.path().join("class.abap"), &changed).unwrap();
+        let incremental = service.index_repository(repository.path(), &deadline()).unwrap();
+        assert_ne!(incremental.generation, fresh.generation);
+        assert_eq!(assert_class(&service, &incremental, changed.as_bytes()), identities);
+        fs::write(repository.path().join("class.abap"), raw).unwrap();
+        let restored = service.index_repository(repository.path(), &deadline()).unwrap();
+        assert_ne!(restored.generation, incremental.generation);
+        assert_eq!(assert_class(&service, &restored, raw), identities);
         drop(service);
         let mut reopened =
             FirstSliceService::new_durable_with_policy(policy, paths.state_dir(), &deadline()).unwrap();
-        assert_eq!(assert_class(&reopened, &fresh), identities);
+        assert_eq!(assert_class(&reopened, &restored, raw), identities);
         assert_eq!(
             reopened
                 .index_repository(repository.path(), &deadline())
                 .unwrap()
                 .generation,
-            fresh.generation
+            restored.generation
         );
     }
 }

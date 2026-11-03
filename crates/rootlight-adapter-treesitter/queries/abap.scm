@@ -10,7 +10,10 @@
 (data_declaration) @signature
 (inline_data_statement) @signature
 (section_declaration) @signature
-(class_implementation) @signature
+(class_implementation) @scope @signature
+(class_implementation name: (identifier) @expression)
+(method_implementation) @scope @signature
+(method_implementation name: (identifier) @reference)
 (class_forward_declaration) @signature
 (interface_forward_declaration) @signature
 (form_definition) @signature

@@ -13097,11 +13097,11 @@ license = "MIT"
 license_source = "third_party/tree-sitter-abap-0.1.0/LICENSE"
 license_sha256 = "75834a75ef078ab7599a27be9d0bb0aff49386b7a97ea4f91f2698d2897d3959"
 modifications = "unchanged upstream parser/scanner/headers and complete20-file Git archive; local static unpublished Rust binding"
-test_corpus = "exact original interface and four small class sources; native owner/member containment, case-stable identities and authored names; implementation, deferred/friend, quoted/commented and recovered-source negatives"
+test_corpus = "exact original interface and four small class sources; native owner/member containment, case-stable identities and authored names; same-file declaration/implementation pairing with exact body evidence; duplicate, absent, later, qualified, unsupported-header, deferred/friend, quoted/commented and recovered-source negatives"
 msrv = "1.90"
 offline_behavior = "compile retained local C11 parser and scanner with versioned local Rust dependencies; no downloads, generation, npm or upstream lifecycle during compilation"
 capabilities = ["source-native-structure", "source-declarations", "source-containment", "source-evidence", "scoped-coverage-gaps"]
-semantic_depth = "ordinary complete native interfaces/classes and direct unqualified instance/static method declarations; implementations, inheritance/header attributes, visibility/members, static dispatch, contracts and generic statements retain scoped binding gaps"
+semantic_depth = "ordinary complete native interfaces/classes and direct unqualified instance/static method declarations; unique earlier same-file class/method declarations own native method implementation definition locations without duplicate entities; ambiguous/external/qualified implementations, implementation headers, inheritance/header attributes, visibility/members, static dispatch, contracts and generic statements retain scoped binding gaps"
 audit_notes = ["upstream is deliberately a permissive structure grammar; clean token-sequence parse is not semantic analysis", "local Git archive preserves complete upstream MIT sources and is not a published Rust package", "native/adapter controls do not qualify discovery/service routing, durable lifecycle or complete finite corpus coverage", "scanner cancellation, adversarial work bounds and reproducible grammar generation remain unqualified"]
 [grammars.vendored]
 manifest_path = "third_party/tree-sitter-abap-0.1.0/Cargo.toml"

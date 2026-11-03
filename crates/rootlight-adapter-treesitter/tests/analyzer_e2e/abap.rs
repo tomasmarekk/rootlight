@@ -288,11 +288,13 @@ fn original_abap_classes_have_native_owners_and_direct_method_declarations() {
                 site.role == OccurrenceRole::Definition
                     && site.target == OccurrenceTarget::Resolved { symbol: member.id }
             }).collect();
-            assert_eq!(sites.len(), 1, "implementation must not duplicate its declaration");
-            assert_eq!(sites[0].source.span().start_byte(), u64::try_from(start).unwrap());
-            assert_eq!(sites[0].source.span().end_byte(), u64::try_from(start + name.len()).unwrap());
-            assert_eq!(sites[0].source.content_hash(), content_hash(raw));
-            assert_eq!(sites[0].syntactic_text_hash, content_hash(name.as_bytes()));
+            assert_eq!(sites.len(), 2, "declaration and implementation share one entity");
+            let declaration = sites.iter().find(|site| site.source.span().start_byte() == u64::try_from(start).unwrap()).unwrap();
+            assert_eq!(declaration.source.span().end_byte(), u64::try_from(start + name.len()).unwrap());
+            for site in sites {
+                assert_eq!(site.source.content_hash(), content_hash(raw));
+                assert_eq!(site.syntactic_text_hash, content_hash(name.as_bytes()));
+            }
             assert_eq!(doc.relations.iter().filter(|r| {
                 r.predicate == RelationPredicate::Contains
                     && r.subject == RelationEndpoint::Entity(owner.id)
@@ -309,6 +311,192 @@ fn original_abap_classes_have_native_owners_and_direct_method_declarations() {
             assert!(doc.skipped_regions.iter().any(|gap| gap.detail == "abap-static-method-dispatch-bindings-unavailable"));
         }
     }
+}
+
+#[test]
+fn original_abap_implementation_locations_share_the_declared_method_identity() {
+    for (raw, method_name) in [
+        (include_bytes!("../../../../tests/native-grammars/fixtures/abap/zcl_abapgit_diff_factory.clas.abap").as_slice(), "get"),
+        (include_bytes!("../../../../tests/native-grammars/fixtures/abap/zcl_abapgit_object_tabl.clas.testclasses.abap").as_slice(), "run"),
+    ] {
+        let output = output(raw);
+        let doc = output.document();
+        let owner = doc.entities.iter().find(|entity| entity.kind == EntityKind::Class).unwrap();
+        let method = doc.entities.iter().find(|entity| entity.kind == EntityKind::Method).unwrap();
+        assert_eq!(doc.entities.iter().filter(|entity| entity.kind == EntityKind::Method).count(), 1);
+        let implementations: Vec<_> = doc.occurrences.iter().filter(|site| site.syntax_kind == "abap.method_implementation_name.reference").collect();
+        if implementations.len() != 1 {
+            let fixture = Fixture::new(ABAP, raw);
+            let limits = limits();
+            let request = request(&fixture.snapshot, &fixture.source, ABAP, &limits);
+            let parsed = rootlight_adapter_sdk::execute_parse(
+                &provider(), &request.to_parse_request(),
+                MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback, &Cancellation::new(),
+            ).unwrap();
+            let facts: Vec<_> = parsed.facts().iter().take(64).map(|fact| (
+                fact.local_id(), fact.parent(), fact.kind(), fact.syntax_kind().as_str(),
+                fact.span().start_byte(), fact.span().end_byte(),
+            )).collect();
+            panic!("implementation join refused retained facts: {facts:?}");
+        }
+        let site = implementations[0];
+        assert_eq!(site.role, OccurrenceRole::Definition);
+        assert_eq!(site.target, OccurrenceTarget::Resolved { symbol: method.id });
+        assert_eq!(site.enclosing, Some(owner.id));
+        let header = format!("METHOD {method_name}.");
+        let start = raw.windows(header.len()).position(|part| part == header.as_bytes()).unwrap();
+        let end = raw.windows(10).position(|part| part == b"ENDMETHOD.").unwrap() + 10;
+        assert_eq!((site.source.span().start_byte(), site.source.span().end_byte()), (u64::try_from(start + 7).unwrap(), u64::try_from(start + 7 + method_name.len()).unwrap()));
+        let evidence = site.evidence.source.as_ref().unwrap();
+        assert_eq!((evidence.span().start_byte(), evidence.span().end_byte()), (u64::try_from(start).unwrap(), u64::try_from(end).unwrap()));
+        assert_eq!(evidence.content_hash(), content_hash(raw));
+        assert_eq!(site.source.content_hash(), content_hash(raw));
+        assert_eq!(site.syntactic_text_hash, content_hash(method_name.as_bytes()));
+        assert_ne!(Some(evidence), method.evidence.source.as_ref());
+        assert!(doc.skipped_regions.iter().all(|gap| !matches!(gap.detail.as_str(), "abap-method-implementation-identity-unavailable" | "abap-class-implementation-identity-unavailable")));
+        assert!(doc.skipped_regions.iter().any(|gap| gap.detail == "abap-statement-structure-and-bindings-unavailable"));
+        assert!(!doc.relations.iter().any(|relation| matches!(relation.predicate, RelationPredicate::Calls | RelationPredicate::Implements | RelationPredicate::Reads | RelationPredicate::Writes)));
+    }
+}
+
+#[test]
+fn abap_implementations_require_unique_earlier_same_file_native_declarations() {
+    for raw in [
+        "CLASS only_body IMPLEMENTATION. METHOD run. ENDMETHOD. ENDCLASS.",
+        "CLASS owner DEFINITION. ENDCLASS. CLASS owner IMPLEMENTATION. METHOD run. ENDMETHOD. ENDCLASS.",
+        "CLASS owner IMPLEMENTATION. METHOD run. ENDMETHOD. ENDCLASS. CLASS owner DEFINITION. METHODS run. ENDCLASS.",
+        "CLASS owner DEFINITION. METHODS run. ENDCLASS. CLASS OWNER DEFINITION. METHODS run. ENDCLASS. CLASS owner IMPLEMENTATION. METHOD run. ENDMETHOD. ENDCLASS.",
+        "CLASS owner DEFINITION. METHODS: run, RUN. ENDCLASS. CLASS owner IMPLEMENTATION. METHOD run. ENDMETHOD. ENDCLASS.",
+        "CLASS owner DEFINITION. METHODS run. CLASS-METHODS RUN. ENDCLASS. CLASS owner IMPLEMENTATION. METHOD run. ENDMETHOD. ENDCLASS.",
+        "CLASS owner DEFINITION. METHODS run. ENDCLASS. CLASS owner IMPLEMENTATION. METHOD run. ENDMETHOD. ENDCLASS. CLASS OWNER IMPLEMENTATION. METHOD run. ENDMETHOD. ENDCLASS.",
+        "CLASS owner DEFINITION. METHODS run. ENDCLASS. CLASS owner IMPLEMENTATION. METHOD run. ENDMETHOD. METHOD RUN. ENDMETHOD. ENDCLASS.",
+        "CLASS first DEFINITION. METHODS run. ENDCLASS. CLASS second DEFINITION. ENDCLASS. CLASS second IMPLEMENTATION. METHOD run. ENDMETHOD. ENDCLASS.",
+        "INTERFACE owner. METHODS run. ENDINTERFACE. CLASS owner IMPLEMENTATION. METHOD run. ENDMETHOD. ENDCLASS.",
+        "CLASS owner DEFINITION. METHODS run. ENDCLASS. CLASS owner IMPLEMENTATION. METHOD run BY DATABASE PROCEDURE FOR HDB LANGUAGE SQLSCRIPT. ENDMETHOD. ENDCLASS.",
+        "CLASS owner DEFINITION. METHODS run. ENDCLASS. CLASS owner IMPLEMENTATION. METHOD zif~run. ENDMETHOD. ENDCLASS.",
+        "CLASS owner DEFINITION. METHODS zif~run. ENDCLASS. CLASS owner IMPLEMENTATION. METHOD run. ENDMETHOD. ENDCLASS.",
+        "CLASS owner DEFINITION. METHODS run. ENDCLASS. CLASS owner IMPLEMENTATION. METHOD run. ENDCLASS.",
+        "CLASS owner DEFINITION. METHODS run. ENDCLASS. WRITE 'CLASS owner IMPLEMENTATION. METHOD run. ENDMETHOD. ENDCLASS.'.",
+    ] {
+        let output = output(raw.as_bytes());
+        let doc = output.document();
+        assert!(
+            !doc.occurrences
+                .iter()
+                .any(|site| site.syntax_kind == "abap.method_implementation_name.reference"),
+            "{raw}: {:?}",
+            doc.occurrences
+        );
+        assert!(
+            doc.skipped_regions
+                .iter()
+                .any(|gap| gap.detail.starts_with("abap-")),
+            "{raw}"
+        );
+    }
+}
+
+#[test]
+fn nonordinary_abap_implementation_headers_keep_location_and_binding_gaps() {
+    let raw = b"CLASS owner DEFINITION. METHODS run. ENDCLASS. CLASS owner IMPLEMENTATION. METHOD run BY DATABASE PROCEDURE FOR HDB LANGUAGE SQLSCRIPT. ENDMETHOD. ENDCLASS.";
+    let output = output(raw);
+    let doc = output.document();
+    let start = raw.windows(7).position(|part| part == b"METHOD ").unwrap();
+    let end = raw
+        .windows(10)
+        .position(|part| part == b"ENDMETHOD.")
+        .unwrap()
+        + 10;
+    for (domain, detail) in [
+        (
+            rootlight_ir::FactDomain::Occurrences,
+            "abap-method-implementation-identity-unavailable",
+        ),
+        (
+            rootlight_ir::FactDomain::Relations,
+            "abap-method-implementation-header-bindings-unavailable",
+        ),
+    ] {
+        let gap = doc
+            .skipped_regions
+            .iter()
+            .find(|gap| gap.domain == domain && gap.detail == detail)
+            .unwrap();
+        assert_eq!(
+            (gap.source.span().start_byte(), gap.source.span().end_byte()),
+            (u64::try_from(start).unwrap(), u64::try_from(end).unwrap())
+        );
+        assert_eq!(gap.source.content_hash(), content_hash(raw));
+    }
+    assert_eq!(
+        doc.entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Method)
+            .count(),
+        1
+    );
+    assert_eq!(
+        doc.occurrences
+            .iter()
+            .filter(|site| site.role == OccurrenceRole::Definition)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn mixed_case_implementations_keep_their_own_native_class_method_pair() {
+    let raw = b"ClAsS First DEFINITION. METHODS Run. ENDCLASS. CLASS second DEFINITION. CLASS-METHODS RUN. ENDCLASS. CLASS FIRST IMPLEMENTATION. METHOD rUn. ENDMETHOD. ENDCLASS. CLASS SECOND IMPLEMENTATION. METHOD run. ENDMETHOD. ENDCLASS.";
+    let output = output(raw);
+    let lower = self::output(&raw.to_ascii_lowercase());
+    let doc = output.document();
+    let implementations: Vec<_> = doc
+        .occurrences
+        .iter()
+        .filter(|site| site.syntax_kind == "abap.method_implementation_name.reference")
+        .collect();
+    assert_eq!(implementations.len(), 2, "{:?}", doc.skipped_regions);
+    for site in implementations {
+        let OccurrenceTarget::Resolved { symbol } = site.target else {
+            panic!("native pairing is resolved")
+        };
+        let method = doc
+            .entities
+            .iter()
+            .find(|entity| entity.id == symbol)
+            .unwrap();
+        assert_eq!(method.kind, EntityKind::Method);
+        assert_eq!(
+            method.container,
+            site.enclosing.map(rootlight_ir::ContainerRef::Entity)
+        );
+        assert!(
+            lower
+                .document()
+                .entities
+                .iter()
+                .any(|entity| entity.id == method.id)
+        );
+        assert_eq!(site.role, OccurrenceRole::Definition);
+        let span = site.source.span();
+        let written = &raw[usize::try_from(span.start_byte()).unwrap()
+            ..usize::try_from(span.end_byte()).unwrap()];
+        assert_eq!(site.syntactic_text_hash, content_hash(written));
+    }
+    assert_eq!(
+        doc.entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Class)
+            .count(),
+        2
+    );
+    assert_eq!(
+        doc.entities
+            .iter()
+            .filter(|entity| entity.kind == EntityKind::Method)
+            .count(),
+        2
+    );
 }
 
 #[test]
