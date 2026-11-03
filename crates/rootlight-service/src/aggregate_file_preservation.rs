@@ -303,10 +303,10 @@ impl Reservation {
                 | FirstSliceError::AggregateCapacity(_)
                 | FirstSliceError::GenerationMemoryLimit { .. },
             ) => {
-                // Failed optional planning owns no surviving table. Return to
-                // the original floor, then run the unchanged strict pipeline.
+                // Failed optional planning drops its table before returning here;
+                // grow-only resizing cannot release that temporary allowance.
                 check_cancellation(cancellation)?;
-                memory.resize(previous, PendingGenerationMemory::Reserved, durable)?;
+                memory.release_temporary(previous)?;
                 *reserved_bytes = previous;
                 Ok(None)
             }
@@ -1060,6 +1060,15 @@ mod tests {
             .is_none()
         );
         assert_eq!(floor, original);
+        assert_eq!(
+            service
+                .generation_cache
+                .lock()
+                .unwrap()
+                .reservations
+                .get(&generation),
+            Some(&original)
+        );
         let cancelled = Cancellation::new();
         cancelled.cancel(CancellationReason::ClientRequest);
         assert!(matches!(
@@ -1080,6 +1089,16 @@ mod tests {
                 CancellationReason::ClientRequest
             ))
         ));
+        assert_eq!(floor, original);
+        assert_eq!(
+            service
+                .generation_cache
+                .lock()
+                .unwrap()
+                .reservations
+                .get(&generation),
+            Some(&original)
+        );
         drop(memory);
         assert_eq!(
             service
