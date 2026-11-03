@@ -29,6 +29,130 @@ fn output_for(case: LanguageCase, raw: &[u8]) -> AnalysisOutput {
 }
 
 #[test]
+fn vbnet_original_main_window_recovers_native_owners_without_body_bindings() {
+    let case = LanguageCase {
+        path: "native/MainWindow.xaml.vb",
+        source: include_str!("../../../../tests/native-grammars/fixtures/vbnet/MainWindow.xaml.vb"),
+        ..VBNET
+    };
+    let raw = case.source.as_bytes();
+    assert_eq!(raw.len(), 93_650);
+    // The complete original exceeds the snippet tree ceiling; output quotas stay fixed.
+    let node_limit = 128 * 1024;
+    let base = limits();
+    let original_limits = AnalysisLimits::new(
+        base.max_source_bytes(),
+        node_limit,
+        base.max_syntax_depth(),
+        base.max_embedded_ranges(),
+        base.max_reported_memory_bytes(),
+        base.syntax_stream().clone(),
+        base.ir_stream().clone(),
+        base.ir().clone(),
+    )
+    .unwrap();
+    let native = Arc::new(
+        TreeSitterProvider::new(
+            RuntimeConfig::new(
+                MAX_SOURCE_BYTES,
+                node_limit,
+                MAX_SYNTAX_DEPTH,
+                32,
+                64,
+                1,
+                16 * 1024 * 1024,
+                ParserSettings::new(4096).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    let analyzer = analyzer(&native, case);
+    let fixture = Fixture::new(case, raw);
+    let output = analyze(
+        &analyzer,
+        &request(&fixture.snapshot, &fixture.source, case, &original_limits),
+        &ExtensionSupport::default(),
+    );
+    let doc = output.document();
+    assert_eq!(doc.files[0].content_hash, content_hash(raw));
+    for (kind, count) in [
+        (EntityKind::Class, 1),
+        (EntityKind::Struct, 3),
+        (EntityKind::Enum, 3),
+        (EntityKind::Method, 48),
+    ] {
+        assert_eq!(
+            doc.entities.iter().filter(|e| e.kind == kind).count(),
+            count,
+            "{kind:?}: gaps={:?}",
+            doc.skipped_regions
+                .iter()
+                .map(|gap| gap.detail.as_str())
+                .take(8)
+                .collect::<Vec<_>>()
+        );
+    }
+    let class = symbol_id_named(doc, "MainWindow");
+    for (name, kind, start, end) in [
+        ("MainWindow", EntityKind::Class, 336, 346),
+        ("AccentPolicy", EntityKind::Struct, 3369, 3381),
+        ("Button_Click_8", EntityKind::Method, 71_771, 71_785),
+    ] {
+        let entity = doc
+            .entities
+            .iter()
+            .find(|e| e.canonical_name == name)
+            .unwrap();
+        assert_eq!(entity.kind, kind);
+        if entity.id != class {
+            assert_eq!(
+                entity.container,
+                Some(rootlight_ir::ContainerRef::Entity(class))
+            );
+        }
+        let sites: Vec<_> = doc
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.target == OccurrenceTarget::Resolved { symbol: entity.id }
+            })
+            .collect();
+        assert_eq!(sites.len(), 1);
+        assert_eq!(
+            (
+                sites[0].source.span().start_byte(),
+                sites[0].source.span().end_byte()
+            ),
+            (start, end)
+        );
+        assert_eq!(sites[0].source.content_hash(), content_hash(raw));
+    }
+    for start in [73_925, 74_403] {
+        assert!(doc.skipped_regions.iter().any(|gap| {
+            gap.detail == "vbnet-statement-binding-and-call-analysis-unavailable"
+                && gap.source.span().start_byte() == start
+        }));
+    }
+    assert!(
+        !doc.skipped_regions
+            .iter()
+            .any(|gap| { gap.detail == "vbnet-complete-native-structure-unavailable" })
+    );
+    assert!(!doc.entities.iter().any(|entity| {
+        matches!(
+            entity.canonical_name.as_str(),
+            "StructLayout" | "LayoutKind" | "Sequential" | "End"
+        )
+    }));
+    assert!(!doc.relations.iter().any(|relation| matches!(
+        relation.predicate,
+        RelationPredicate::Calls | RelationPredicate::Reads | RelationPredicate::Writes
+    )));
+}
+
+#[test]
 fn vbnet_complete_original_external_methods_have_authored_names_and_owners() {
     for (case, names, spans, method_count) in [
         (
@@ -331,6 +455,10 @@ fn vbnet_case_identity_preserves_written_names_and_native_owners() {
 fn vbnet_unsupported_contexts_do_not_fabricate_declarations_or_bindings() {
     for raw in [
         "Public Class Broken\nPublic Sub Run(ByVal value As Integer)\n",
+        "Class Broken\nSub Run()\nEnd\nEnd Class\n",
+        "Class Broken\nSub Run()\n<A>\nStructure Invalid\nEnd Structure\nEnd Sub\nEnd Class\n",
+        "Class Broken\n<Assembly: Marker>\nStructure Invalid\nEnd Structure\nEnd Class\n",
+        "Class Broken\n<Module: Marker>\nStructure Invalid\nEnd Structure\nEnd Class\n",
         "#If False Then\nPublic Class ConditionalOwner\nEnd Class\n#End If\n",
         "Namespace Unproved.Path\nPublic Class Hidden\nEnd Class\nEnd Namespace\n",
     ] {
@@ -338,7 +466,7 @@ fn vbnet_unsupported_contexts_do_not_fabricate_declarations_or_bindings() {
         assert!(
             !output.document().entities.iter().any(|e| matches!(
                 e.kind,
-                EntityKind::Class | EntityKind::Method | EntityKind::Parameter
+                EntityKind::Class | EntityKind::Struct | EntityKind::Method | EntityKind::Parameter
             )),
             "{raw}: {:?}",
             output.document().entities

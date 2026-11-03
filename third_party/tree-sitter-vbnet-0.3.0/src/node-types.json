@@ -989,6 +989,11 @@
     "fields": {}
   },
   {
+    "type": "end_statement",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "enum_block",
     "named": true,
     "fields": {
@@ -3206,6 +3211,10 @@
           "named": true
         },
         {
+          "type": "end_statement",
+          "named": true
+        },
+        {
           "type": "erase_statement",
           "named": true
         },
@@ -3316,6 +3325,16 @@
     "type": "structure_block",
     "named": true,
     "fields": {
+      "attributes": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "type_attribute_block",
+            "named": true
+          }
+        ]
+      },
       "implements": {
         "multiple": false,
         "required": false,
@@ -3616,6 +3635,51 @@
       "types": [
         {
           "type": "type",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "type_attribute",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "namespace_name",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "argument_list",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "type_attribute_block",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "type_attribute",
           "named": true
         }
       ]

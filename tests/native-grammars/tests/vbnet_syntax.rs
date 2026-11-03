@@ -4,6 +4,7 @@
 use tree_sitter::{Node, Parser};
 
 const ORIGINAL: &[u8] = include_bytes!("../fixtures/vbnet/TaskbarAnimate.vb");
+const MAIN_WINDOW: &[u8] = include_bytes!("../fixtures/vbnet/MainWindow.xaml.vb");
 
 fn parse(source: &[u8]) -> tree_sitter::Tree {
     let mut parser = Parser::new();
@@ -63,6 +64,97 @@ fn quoted_and_commented_names_do_not_create_native_declarations() {
     assert_eq!(nodes(root, "class_block").len(), 1);
     assert_eq!(nodes(root, "method_declaration").len(), 1);
     assert_eq!(nodes(root, "parameter").len(), 1);
+}
+
+#[test]
+fn standalone_end_keeps_compound_terminators_and_written_statement_spans() {
+    let source = b"Public Class Owner\nPublic Sub Run(ByVal shouldQuit As Boolean)\nIf shouldQuit Then\nEnd\nEnd If\neNd\nDim text As String = \"End\"\n' End\nEnd Sub\nEnd Class\n";
+    let tree = parse(source);
+    let root = tree.root_node();
+    assert!(!root.has_error(), "{}", root.to_sexp());
+    assert_eq!(nodes(root, "class_block").len(), 1);
+    assert_eq!(nodes(root, "method_declaration").len(), 1);
+    let statements = nodes(root, "end_statement");
+    assert_eq!(statements.len(), 2);
+    for (statement, expected) in statements.iter().zip([b"End\n".as_slice(), b"eNd\n"]) {
+        assert_eq!(&source[statement.byte_range()], expected);
+    }
+}
+
+#[test]
+fn standalone_end_does_not_consume_empty_clause_or_owner_terminators() {
+    for body in [
+        "Try\nCatch\nFinally\nEnd Try\n",
+        "Try\nEnd\nCatch\nEnd\nFinally\nEnd\nEnd Try\n",
+        "If True Then\nElseIf False Then\nElse\nEnd If\n",
+        "Select Case 1\nCase 1\nCase Else\nEnd Select\n",
+    ] {
+        let source = format!("Class Owner\nSub Run()\n{body}End Sub\nEnd Class\n");
+        let tree = parse(source.as_bytes());
+        assert!(
+            !tree.root_node().has_error(),
+            "{}",
+            tree.root_node().to_sexp()
+        );
+        assert_eq!(nodes(tree.root_node(), "method_declaration").len(), 1);
+    }
+    for source in [
+        "Class Owner\nSub Run()\nEnd\nEnd Class\n",
+        "Class Owner\nSub Run()\nEnd 1\nEnd Sub\nEnd Class\n",
+    ] {
+        assert!(parse(source.as_bytes()).root_node().has_error(), "{source}");
+    }
+}
+
+#[test]
+fn complete_original_main_window_keeps_nested_structure_and_end_statements() {
+    assert_eq!(MAIN_WINDOW.len(), 93_650);
+    let tree = parse(MAIN_WINDOW);
+    let root = tree.root_node();
+    assert!(
+        !root.has_error(),
+        "native recovery spans: {:?}",
+        nodes(root, "ERROR")
+            .iter()
+            .map(Node::byte_range)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(nodes(root, "method_declaration").len(), 43);
+    assert_eq!(nodes(root, "external_declaration").len(), 5);
+    let ends = nodes(root, "end_statement");
+    assert_eq!(ends.len(), 2);
+    assert_eq!(ends[0].start_byte(), 73_925);
+    assert_eq!(ends[1].start_byte(), 74_403);
+    let policy = nodes(root, "structure_block")
+        .into_iter()
+        .find(|node| {
+            node.child_by_field_name("name")
+                .is_some_and(|name| &MAIN_WINDOW[name.byte_range()] == b"AccentPolicy")
+        })
+        .expect("authored attributed structure");
+    assert_eq!(policy.parent().unwrap().kind(), "class_block");
+    assert!(policy.child_by_field_name("attributes").is_some());
+}
+
+#[test]
+fn attributed_structures_require_complete_type_member_placement() {
+    let globals = parse(b"<Assembly: Marker>\n<Module: Marker>\nClass Owner\nEnd Class\n");
+    assert!(!globals.root_node().has_error());
+    let valid = b"Class Owner\n<StructLayout(LayoutKind.Sequential)>\nFriend Structure Policy\nPublic Value As Integer\nEnd Structure\nEnd Class\n";
+    let tree = parse(valid);
+    assert!(!tree.root_node().has_error());
+    let structures = nodes(tree.root_node(), "structure_block");
+    assert_eq!(structures.len(), 1);
+    assert_eq!(structures[0].parent().unwrap().kind(), "class_block");
+    for source in [
+        "Class Owner\nSub Run()\n<A>\nStructure Invalid\nEnd Structure\nEnd Sub\nEnd Class\n",
+        "Class Owner\n<A>\nEnd Class\n",
+        "Class Owner\n<A>\nStructure Incomplete\nEnd Class\n",
+        "Class Owner\n<Assembly: Marker>\nStructure Invalid\nEnd Structure\nEnd Class\n",
+        "Class Owner\n<Module: Marker>\nStructure Invalid\nEnd Structure\nEnd Class\n",
+    ] {
+        assert!(parse(source.as_bytes()).root_node().has_error(), "{source}");
+    }
 }
 
 #[test]

@@ -2,6 +2,7 @@
 //! Full-source retention and lifecycle controls do not qualify body semantics.
 
 use super::*;
+use rootlight_source::{SourceEncoding, SourceReadOptions};
 use rootlight_storage::{
     GenerationBudget, GenerationContext, GenerationReadLimit, GenerationReader,
     OccurrenceReadRequest,
@@ -13,6 +14,205 @@ const ORIGINAL: &[u8] =
 const MSAA: &[u8] = include_bytes!("../../../../tests/native-grammars/fixtures/vbnet/MSAA.vb");
 const STYLE: &[u8] =
     include_bytes!("../../../../tests/native-grammars/fixtures/vbnet/TaskbarStyle.vb");
+const MAIN_WINDOW: &[u8] =
+    include_bytes!("../../../../tests/native-grammars/fixtures/vbnet/MainWindow.xaml.vb");
+
+fn assert_main_window_generation(
+    service: &FirstSliceService,
+    receipt: &FirstSliceIndexReceipt,
+    paths: &RuntimePaths,
+    raw: &[u8],
+) -> Vec<SymbolId> {
+    let cancel = deadline();
+    let context = GenerationContext::new(&cancel, GenerationBudget::default());
+    let directory = paths
+        .state_dir()
+        .join("first-slice/repositories")
+        .join(receipt.repository.to_string())
+        .join(receipt.generation.to_string());
+    let reader = rootlight_catalog::OracleReader::open_in(&directory, &context).unwrap();
+    let generation = reader.read_generation(&context).unwrap();
+    let doc = generation.document();
+    assert_eq!(doc.files.len(), 1);
+    let file = &doc.files[0];
+    assert_eq!(file.language, "visual-basic-dotnet");
+    assert_eq!(file.content_hash, content_hash(raw));
+    let mut exact_bytes = Vec::new();
+    let mut start = 0;
+    while start < raw.len() {
+        let limit = (start + 32 * 1024).min(raw.len());
+        let end = if limit == raw.len() {
+            limit
+        } else {
+            start
+                + raw[start..limit]
+                    .iter()
+                    .rposition(|byte| *byte == b'\n')
+                    .unwrap()
+                + 1
+        };
+        let span =
+            SourceSpan::new(file.id, start.try_into().unwrap(), end.try_into().unwrap()).unwrap();
+        let source = SourceRef::new(
+            file.repository,
+            receipt.generation,
+            span,
+            file.content_hash,
+            None,
+        );
+        let read = service
+            .source_read_with_options_and_budget(
+                receipt.generation,
+                vec![source],
+                SourceReadOptions::new()
+                    .with_context_lines_before(0)
+                    .with_context_lines_after(0)
+                    .with_encoding(SourceEncoding::Bytes),
+                FirstSliceBudget::default(),
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks.len(), 1);
+        assert_eq!(
+            (read.data.chunks[0].start_byte, read.data.chunks[0].end_byte),
+            (start as u64, end as u64)
+        );
+        assert!(read.data.chunks[0].bytes == raw[start..end]);
+        exact_bytes.extend_from_slice(&read.data.chunks[0].bytes);
+        start = end;
+    }
+    assert!(exact_bytes == raw);
+    for (kind, count) in [
+        (EntityKind::Class, 1),
+        (EntityKind::Struct, 3),
+        (EntityKind::Enum, 3),
+        (EntityKind::Method, 48),
+    ] {
+        assert_eq!(
+            doc.entities
+                .iter()
+                .filter(|entity| entity.kind == kind)
+                .count(),
+            count
+        );
+    }
+    let class = doc
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "MainWindow")
+        .unwrap();
+    let mut identities = Vec::new();
+    for (name, kind, start, end) in [
+        ("MainWindow", EntityKind::Class, 336, 346),
+        ("AccentPolicy", EntityKind::Struct, 3369, 3381),
+        ("Button_Click_8", EntityKind::Method, 71_771, 71_785),
+    ] {
+        let entity = doc
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        assert_eq!(entity.kind, kind);
+        if entity.id != class.id {
+            assert_eq!(
+                entity.container,
+                Some(rootlight_ir::ContainerRef::Entity(class.id))
+            );
+        }
+        let sites: Vec<_> = doc
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.target == OccurrenceTarget::Resolved { symbol: entity.id }
+            })
+            .collect();
+        assert_eq!(sites.len(), 1);
+        assert_eq!(
+            (
+                sites[0].source.span().start_byte(),
+                sites[0].source.span().end_byte()
+            ),
+            (start, end)
+        );
+        assert_eq!(sites[0].source.content_hash(), content_hash(raw));
+        identities.push(entity.id);
+    }
+    for start in [73_925, 74_403] {
+        assert!(doc.skipped_regions.iter().any(|gap| {
+            gap.detail == "vbnet-statement-binding-and-call-analysis-unavailable"
+                && gap.source.span().start_byte() == start
+                && gap.source.generation() == receipt.generation
+        }));
+    }
+    assert!(
+        !doc.skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "vbnet-complete-native-structure-unavailable")
+    );
+    assert!(!doc.relations.iter().any(|relation| matches!(
+        relation.predicate,
+        RelationPredicate::Calls | RelationPredicate::Reads | RelationPredicate::Writes
+    )));
+    identities
+}
+
+#[test]
+fn vbnet_complete_main_window_survives_noop_append_restore_and_cold_reopen() {
+    let repository = durable_test_tempdir();
+    let storage = durable_test_tempdir();
+    let paths =
+        RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime")).unwrap();
+    paths.prepare_owner().unwrap();
+    let source = repository.path().join("MainWindow.xaml.vb");
+    fs::write(&source, MAIN_WINDOW).unwrap();
+    let policy = FirstSliceStoragePolicy::resolve_user_config(None, 3).unwrap();
+    let mut service =
+        FirstSliceService::new_durable_with_policy(policy.clone(), paths.state_dir(), &deadline())
+            .unwrap();
+    let fresh = service
+        .index_repository(repository.path(), &deadline())
+        .unwrap();
+    let identities = assert_main_window_generation(&service, &fresh, &paths, MAIN_WINDOW);
+    let noop = service
+        .index_repository(repository.path(), &deadline())
+        .unwrap();
+    assert_eq!(noop.generation, fresh.generation);
+    let mut changed = MAIN_WINDOW.to_vec();
+    changed.push(b'\n');
+    fs::write(&source, &changed).unwrap();
+    let incremental = service
+        .index_repository(repository.path(), &deadline())
+        .unwrap();
+    assert_ne!(incremental.generation, fresh.generation);
+    assert_eq!(
+        assert_main_window_generation(&service, &incremental, &paths, &changed),
+        identities
+    );
+    fs::write(&source, MAIN_WINDOW).unwrap();
+    let restored = service
+        .index_repository(repository.path(), &deadline())
+        .unwrap();
+    assert_ne!(restored.generation, incremental.generation);
+    assert_eq!(
+        assert_main_window_generation(&service, &restored, &paths, MAIN_WINDOW),
+        identities
+    );
+    drop(service);
+    let mut reopened =
+        FirstSliceService::new_durable_with_policy(policy, paths.state_dir(), &deadline()).unwrap();
+    assert_eq!(
+        assert_main_window_generation(&reopened, &restored, &paths, MAIN_WINDOW),
+        identities
+    );
+    assert_eq!(
+        reopened
+            .index_repository(repository.path(), &deadline())
+            .unwrap()
+            .generation,
+        restored.generation
+    );
+}
 
 fn assert_external_originals(
     service: &FirstSliceService,

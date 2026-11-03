@@ -169,6 +169,41 @@ fn hlsl_original_formals_survive_case_edit_restore_and_cold_reopen() {
 }
 
 #[test]
+fn vbnet_native_grammar_changes_invalidate_preceding_parser_digest() {
+    let registry = GrammarRegistry::audited().unwrap();
+    let descriptor = registry
+        .descriptors()
+        .iter()
+        .find(|descriptor| descriptor.language().as_str() == "visual-basic-dotnet")
+        .unwrap();
+    let previous_source = "14c073f418cf8e0d89112459cf3aeb719d3a068c0e363b41606a43f46e1fce4c";
+    let previous_parser = "4275d95f4ab7a55ce1064bae8648bdd203961b7de5de1ba02b7ae647ee58ad92";
+    for (source, parser) in [
+        (previous_source, descriptor.parser_sha256()),
+        (descriptor.grammar_source_sha256(), previous_parser),
+        (previous_source, previous_parser),
+    ] {
+        let preceding = hash_static_components(&[
+            ANALYZER_BINARY_SEED,
+            descriptor.language().as_str().as_bytes(),
+            descriptor.grammar_version().as_bytes(),
+            source.as_bytes(),
+            parser.as_bytes(),
+            descriptor
+                .scanner_sha256()
+                .unwrap_or("no-scanner")
+                .as_bytes(),
+        ])
+        .unwrap();
+        assert_ne!(grammar_binary_digest(descriptor).unwrap(), preceding);
+    }
+    assert_eq!(
+        ANALYZER_BINARY_SEED,
+        b"rootlight.first-slice.treesitter-structural/389"
+    );
+}
+
+#[test]
 fn vbnet_external_declarations_invalidate_the_preceding_analyzer() {
     let grammar = first_slice_grammar_revision_hash().unwrap();
     let preceding = hash_static_components(&[

@@ -8,7 +8,29 @@
      [$.type, $.invocation],
      [$.type] ,
      [$.new_expression] ,
-@@ -147,7 +148,7 @@
+@@ -35,11 +36,21 @@
+     [$.label_statement, $.expression],
+     [$.event_declaration],
+     [$.if_statement],
++    // A bare End must remain distinct from the enclosing clause's End <keyword>.
++    [$.catch_block],
++    [$.finally_block],
++    [$.else_clause],
++    [$.case_else_block],
++    [$.case_block],
++    [$.elseif_clause],
+     [$.type, $.array_type],
+     [$.if_statement, $.binary_expression],
+     [$.empty_statement, $.if_statement],
+     [$.class_block, $._member_declaration],
+     [$.namespace_name, $.attribute],
++    [$.namespace_name, $.attribute, $.type_attribute],
++    [$.attribute, $.type_attribute],
++    [$.namespace_name, $.type_attribute],
+     [$.namespace_name],
+     [$.namespace_name, $.expression],
+     [$.type, $.new_expression],
+@@ -147,7 +158,7 @@
          field('implements', $.implements_clause)
        )),
        $._terminator,
@@ -17,7 +39,7 @@
        kw('End'), kw('Class'), optional($._terminator)
      )),
  
-@@ -157,7 +158,7 @@
+@@ -157,12 +168,13 @@
        kw('Module'),
        field('name', $.identifier),
        $._terminator,
@@ -26,7 +48,14 @@
        kw('End'), kw('Module'), optional($._terminator)
      )),
  
-@@ -172,7 +173,7 @@
+     // Structure definition block
+-    structure_block: $ => prec.right(seq(
++    structure_block: $ => prec.right(1, seq(
++      optional(field('attributes', $.type_attribute_block)),
+       field('modifiers', optional($.modifiers)),
+       kw('Structure'),
+       field('name', $.identifier),
+@@ -172,7 +184,7 @@
          field('implements', $.implements_clause)
        )),
        $._terminator,
@@ -35,8 +64,24 @@
        kw('End'), kw('Structure'), optional($._terminator)
      )),
  
-@@ -272,7 +273,7 @@
+@@ -270,9 +282,23 @@
+       optional($.argument_list)
+     ),
  
++    // Global Assembly/Module targets cannot attach to nested type declarations.
++    type_attribute_block: $ => prec.right(seq(
++      '<',
++      optional($._newline),
++      commaSep1($.type_attribute),
++      optional($._newline),
++      '>',
++      optional($._terminator)
++    )),
++    type_attribute: $ => seq(
++      field('name', choice($.identifier, $.namespace_name)),
++      optional($.argument_list)
++    ),
++
      // Modifiers (public/private/etc.). Multiple modifiers can appear in sequence.
      modifiers: $ => repeat1($.modifier),
 -    modifier: $ => token(choice(
@@ -44,7 +89,7 @@
        kw('Public'), kw('Private'), kw('Protected'), kw('Friend'),
        kw('Shared'), kw('Shadows'), kw('Static'),
        kw('Overloads'), kw('Overrides'), kw('Overridable'), kw('NotOverridable'), kw('MustOverride'),
-@@ -281,7 +282,7 @@
+@@ -281,7 +307,7 @@
        kw('Default'),              // for default properties
        kw('ReadOnly'), kw('WriteOnly'),
        kw('WithEvents'), kw('Async'), kw('Iterator')
@@ -53,7 +98,7 @@
  
      // Type member declarations inside class/module/etc.
      _member_declaration: $ => choice(
-@@ -430,6 +431,30 @@
+@@ -430,6 +456,30 @@
          // Without body (e.g., abstract method in MustInherit class, or interface method):
          $._terminator
        )
@@ -84,3 +129,20 @@
      ),
  
      // Constructor (Sub New) declaration
+@@ -593,6 +643,7 @@
+       $.raise_event_statement,
+       $.erase_statement,
+       $.stop_statement,
++      $.end_statement,
+       $.on_error_statement,
+       $.preprocessor_directive,  // allow preprocessor directives in code flow
+       $.compound_assignment_statement,
+@@ -888,6 +939,8 @@
+     ),
+     erase_statement: $ => seq(kw('Erase'), commaSep1($.expression), $._terminator),
+     stop_statement: $ => seq(kw('Stop'), $._terminator),
++
++    end_statement: $ => seq(kw('End'), $._terminator),
+     // `On Error GoTo 0` / `On Error Resume Next`
+     on_error_statement: $ => seq(
+       kw('On'), kw('Error'),

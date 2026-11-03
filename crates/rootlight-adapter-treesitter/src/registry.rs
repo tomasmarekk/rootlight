@@ -1583,8 +1583,8 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
         GrammarFamily::VbNet => GrammarIdentity {
             language_id: "visual-basic-dotnet",
             grammar_version: "0.3.0",
-            source_package_sha256: "14c073f418cf8e0d89112459cf3aeb719d3a068c0e363b41606a43f46e1fce4c",
-            parser_sha256: "4275d95f4ab7a55ce1064bae8648bdd203961b7de5de1ba02b7ae647ee58ad92",
+            source_package_sha256: "60bee4d4965f34789777aae2da341fecf156e64135d98ae373c3416577fc4fab",
+            parser_sha256: "5778ec353255c5fcc4035b10c3f02cb5456805b9c5aad0edc5493b0a98668c83",
             scanner_sha256: None,
         },
         GrammarFamily::Vento => GrammarIdentity {

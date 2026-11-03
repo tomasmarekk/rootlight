@@ -12,8 +12,12 @@ The archive is 24,309,760 bytes, SHA-256 `1c452d2aeead2ce09bf39dab1bf5d0aa281d3d
 external `Declare` member signatures with library, entry-point, character-set and
 parameter fields, plus shared keyword terminals for ordinary/external modifiers.
 External declarations are admitted in class/module/structure member lists, without
-inventing DLL, ABI or marshaling bindings. Original upstream C/JSON and paired
-headers, generated with Tree-sitter 0.25.8, remain unchanged in the archive.
+inventing DLL, ABI or marshaling bindings. Standalone `End` statements and targetless
+attributes on `Structure` declarations preserve native enclosing owners. Assembly and
+Module targets remain file-level attributes and are rejected on nested structures.
+Compound block terminators remain distinct; runtime termination and attribute bindings
+are not inferred. Original upstream C/JSON and paired headers, generated with
+Tree-sitter 0.25.8, remain unchanged in the archive.
 
 The preferred ABI15 C/JSON and paired headers were generated separately using the
 declared Tree-sitter CLI 0.26.8 prerequisite and
@@ -21,7 +25,7 @@ declared Tree-sitter CLI 0.26.8 prerequisite and
 `a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0`.
 Two successful invocations with identical preferred inputs produced byte-identical
 outputs. Parser SHA-256 is
-`4275d95f4ab7a55ce1064bae8648bdd203961b7de5de1ba02b7ae647ee58ad92`.
+`5778ec353255c5fcc4035b10c3f02cb5456805b9c5aad0edc5493b0a98668c83`.
 No generated C table was hand-edited. `LICENSE.TREE-SITTER` retains the generator
 and paired-header project's complete MIT notice. Upstream grammar MIT notice
 SHA-256 remains `b94d0fbc2f7ff9e8e747c8aa01253453eddc0be7ab23f4b403e012aec234783d`.
@@ -32,8 +36,11 @@ pinned versioned Rust inputs. Standard headers and declared compilers remain
 environment prerequisites. Compilation runs no downloads, npm lifecycle or grammar
 generation. The local package name does not claim upstream Rust publication.
 
-Native syntax tests use complete licensed TaskbarX, MSAA and TaskbarStyle originals
-with exact physical bytes. They establish only the tested structure and spans.
+Native syntax tests use complete licensed TaskbarX, MSAA, TaskbarStyle and MainWindow
+originals with exact physical bytes. They verify source-owned declarations, targetless
+structure attributes, file-level global targets, rejected nested global targets,
+standalone statements and compound terminators. They establish only the tested
+structure and spans.
 Other original recovery cases remain open. Whole VB.NET semantics, complete
 corpus support, reproducible generation and adversarial parser work bounds remain
 unqualified.

@@ -36,11 +36,21 @@ module.exports = grammar({
     [$.label_statement, $.expression],
     [$.event_declaration],
     [$.if_statement],
+    // A bare End must remain distinct from the enclosing clause's End <keyword>.
+    [$.catch_block],
+    [$.finally_block],
+    [$.else_clause],
+    [$.case_else_block],
+    [$.case_block],
+    [$.elseif_clause],
     [$.type, $.array_type],
     [$.if_statement, $.binary_expression],
     [$.empty_statement, $.if_statement],
     [$.class_block, $._member_declaration],
     [$.namespace_name, $.attribute],
+    [$.namespace_name, $.attribute, $.type_attribute],
+    [$.attribute, $.type_attribute],
+    [$.namespace_name, $.type_attribute],
     [$.namespace_name],
     [$.namespace_name, $.expression],
     [$.type, $.new_expression],
@@ -163,7 +173,8 @@ module.exports = grammar({
     )),
 
     // Structure definition block
-    structure_block: $ => prec.right(seq(
+    structure_block: $ => prec.right(1, seq(
+      optional(field('attributes', $.type_attribute_block)),
       field('modifiers', optional($.modifiers)),
       kw('Structure'),
       field('name', $.identifier),
@@ -267,6 +278,20 @@ module.exports = grammar({
     // ),
     attribute: $ => seq(
       optional(seq(field('target', $.identifier), ':')),
+      field('name', choice($.identifier, $.namespace_name)),
+      optional($.argument_list)
+    ),
+
+    // Global Assembly/Module targets cannot attach to nested type declarations.
+    type_attribute_block: $ => prec.right(seq(
+      '<',
+      optional($._newline),
+      commaSep1($.type_attribute),
+      optional($._newline),
+      '>',
+      optional($._terminator)
+    )),
+    type_attribute: $ => seq(
       field('name', choice($.identifier, $.namespace_name)),
       optional($.argument_list)
     ),
@@ -618,6 +643,7 @@ module.exports = grammar({
       $.raise_event_statement,
       $.erase_statement,
       $.stop_statement,
+      $.end_statement,
       $.on_error_statement,
       $.preprocessor_directive,  // allow preprocessor directives in code flow
       $.compound_assignment_statement,
@@ -913,6 +939,8 @@ module.exports = grammar({
     ),
     erase_statement: $ => seq(kw('Erase'), commaSep1($.expression), $._terminator),
     stop_statement: $ => seq(kw('Stop'), $._terminator),
+
+    end_statement: $ => seq(kw('End'), $._terminator),
     // `On Error GoTo 0` / `On Error Resume Next`
     on_error_statement: $ => seq(
       kw('On'), kw('Error'),
