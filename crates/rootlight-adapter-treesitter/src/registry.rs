@@ -121,6 +121,8 @@ pub enum GrammarFamily {
     Gyp,
     /// Native ABAP declarations and same-file implementation locations with binding gaps.
     Abap,
+    /// Native VB.NET written owners, ordinary methods and formal declarations.
+    VbNet,
     /// Native Vento host declarations without embedded JavaScript evaluation.
     Vento,
     /// JavaScript and JSX grammar with typed-syntax tolerance.
@@ -403,6 +405,7 @@ impl GrammarRegistry {
             GrammarFamily::Python,
             GrammarFamily::Gyp,
             GrammarFamily::Abap,
+            GrammarFamily::VbNet,
             GrammarFamily::Vento,
             GrammarFamily::JavaScript,
             GrammarFamily::Java,
@@ -621,6 +624,7 @@ pub(crate) fn language_for(family: GrammarFamily) -> Language {
         GrammarFamily::Rust => tree_sitter_rust::LANGUAGE.into(),
         GrammarFamily::Python | GrammarFamily::Gyp => tree_sitter_python::LANGUAGE.into(),
         GrammarFamily::Abap => tree_sitter_abap::LANGUAGE.into(),
+        GrammarFamily::VbNet => tree_sitter_vbnet::LANGUAGE.into(),
         GrammarFamily::Vento => tree_sitter_vento::LANGUAGE.into(),
         // TSX accepts ordinary JavaScript and JSX while retaining declarations
         // around type annotations that otherwise trigger file-wide recovery.
@@ -1576,6 +1580,13 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
                 "521500b65097deab41f8a29e387296e245f9ffa1167ad593105b8a75b454a087",
             ),
         },
+        GrammarFamily::VbNet => GrammarIdentity {
+            language_id: "vbnet",
+            grammar_version: "0.3.0",
+            source_package_sha256: "f13c434e7175a4112f222eeb4aaaa1d0a33f2ce68a2e7aa831afae0bd2259a91",
+            parser_sha256: "500a1a0f01d0a4f7ee0bcab589c8af0f8ea0e74db22763e30667b7cad9d690c3",
+            scanner_sha256: None,
+        },
         GrammarFamily::Vento => GrammarIdentity {
             language_id: "vento",
             grammar_version: "0.21.0",
@@ -1789,6 +1800,7 @@ mod tests {
             GrammarFamily::Gyp,
             GrammarFamily::JavaScript,
             GrammarFamily::Abap,
+            GrammarFamily::VbNet,
             GrammarFamily::Vento,
             GrammarFamily::Java,
             GrammarFamily::Apex,

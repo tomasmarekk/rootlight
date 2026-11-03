@@ -125,6 +125,7 @@ mod typescript_calls;
 mod typescript_const;
 mod typespec;
 mod v;
+mod vbnet;
 mod vento;
 mod vhdl;
 mod wesl;
@@ -9669,12 +9670,14 @@ impl<'context, 'source> Lowering<'context, 'source> {
                 qualified_length,
                 self.request.limits().ir().max_string_bytes,
             )?;
-            let authored_display_span = if (matches!(language.as_str(), "abap" | "vhdl")
+            let authored_display_span = if (matches!(language.as_str(), "abap" | "vbnet" | "vhdl")
                 && definition.is_some())
                 || (language == "julia" && (name.is_empty() || name.chars().any(char::is_control)))
             {
                 let failure = if language == "abap" {
                     "abap-display-definition"
+                } else if language == "vbnet" {
+                    "vbnet-display-definition"
                 } else if language == "vhdl" {
                     "vhdl-display-definition"
                 } else {
@@ -10918,6 +10921,7 @@ fn materialize_entity(
     let signature_discriminator = if matches!(
         draft.language.as_str(),
         "abap"
+            | "vbnet"
             | "assembly"
             | "clojure"
             | "racket"
@@ -11780,6 +11784,9 @@ fn wgsl_source_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
 }
 
 fn source_coverage_gap(fact: &SyntaxFact) -> Option<(FactDomain, &'static str)> {
+    if fact.syntax_kind().as_str().starts_with("vbnet.") {
+        return vbnet::gap(fact);
+    }
     if fact.syntax_kind().as_str().starts_with("abap.") {
         return abap::gap(fact);
     }
@@ -12429,6 +12436,9 @@ fn json_data_identity(parent: Option<[u8; 32]>, kind: &str, position: u64) -> [u
 }
 
 fn uses_written_source_identity(language: &str, kind: EntityKind, label: &str) -> bool {
+    if language == "vbnet" {
+        return vbnet::written(kind, label);
+    }
     if language == "abap" {
         return abap::written(kind, label);
     }
@@ -12872,6 +12882,8 @@ fn written_source_identity(
         "rootlight.wgsl-source-occurrence/1"
     } else if language == "abap" {
         "rootlight.abap-source-occurrence/1"
+    } else if language == "vbnet" {
+        "rootlight.vbnet-source-occurrence/1"
     } else if language == "hlsl" {
         "rootlight.hlsl-source-occurrence/1"
     } else {
@@ -13934,6 +13946,11 @@ fn test_source_path(path: &str) -> bool {
 }
 
 fn is_explicit_file_module(fact: &SyntaxFact, language: &str) -> bool {
+    if language == "vbnet" || fact.syntax_kind().as_str().starts_with("vbnet.") {
+        return language == "vbnet"
+            && fact.kind() == SyntaxFactKind::Module
+            && fact.syntax_kind().as_str() == "vbnet.file.module";
+    }
     if language == "abap" || fact.syntax_kind().as_str().starts_with("abap.") {
         return language == "abap"
             && fact.kind() == SyntaxFactKind::Module
@@ -14267,6 +14284,9 @@ fn is_haskell_type_annotation(fact: &SyntaxFact) -> bool {
 }
 
 fn is_signature_capture(fact: &SyntaxFact) -> bool {
+    if fact.syntax_kind().as_str().starts_with("vbnet.") {
+        return false;
+    }
     if fact.syntax_kind().as_str().starts_with("abap.") {
         return false;
     }

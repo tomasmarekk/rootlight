@@ -1,4 +1,7 @@
 * text=auto eol=lf
+# VB.NET native inputs and original BOM/CRLF fixtures retain exact bytes.
+/third_party/tree-sitter-vbnet-0.3.0/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+/tests/native-grammars/fixtures/vbnet/** -text whitespace=cr-at-eol
 # Vento's retained native sources, original Git archive and fixture remain byte-exact.
 /third_party/tree-sitter-vento-0.21.0/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
 /tests/native-grammars/fixtures/vento/** -text

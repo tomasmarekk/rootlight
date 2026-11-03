@@ -83,6 +83,7 @@ mod php_ordinary;
 mod php_this_calls;
 pub(crate) mod ruby_bindings;
 pub(crate) mod ruby_formal_receivers;
+mod vbnet;
 mod vento;
 pub use identity_refusal::NativeIdentityRefusalDetails;
 use identity_refusal::{IdentityRefusal, RefusalOrigin};
@@ -689,6 +690,17 @@ impl QueryPack {
                 "definition",
                 "module",
                 "root",
+                "signature",
+            ];
+        }
+        if family == GrammarFamily::VbNet {
+            expected = vec![
+                "comment",
+                "declaration",
+                "definition",
+                "module",
+                "root",
+                "scope",
                 "signature",
             ];
         }
@@ -1925,6 +1937,13 @@ impl QueryPack {
         ) && matches!(input.tree.included_ranges().as_slice(), [range]
             if range.start_byte == 0 && range.end_byte >= input.source.len());
 
+        let vbnet_context = input.family != GrammarFamily::VbNet
+            || vbnet::preprocessing_context(
+                input.tree.root_node(),
+                limits.body_nodes,
+                input.cancellation,
+            )?;
+
         'query: while let Some(query_match) = matches.next() {
             if match_count >= limits.matches {
                 limit = Some(QueryLimit::Match);
@@ -2068,6 +2087,20 @@ impl QueryPack {
                             input.source,
                             input.cancellation,
                         )?)?;
+                    }
+                    continue;
+                }
+                if input.family == GrammarFamily::VbNet {
+                    if let Some(candidate) = vbnet::candidate(
+                        capture.node,
+                        role,
+                        input.source,
+                        input.tree.root_node(),
+                        complete_file_input,
+                        vbnet_context,
+                        input.cancellation,
+                    )? {
+                        retain(candidate)?;
                     }
                     continue;
                 }
@@ -5019,6 +5052,7 @@ fn candidate_for_capture(
             GrammarFamily::Ron => return Err(query_failure("query-ron-data-call-unavailable")),
             GrammarFamily::Gyp => return Err(query_failure("query-gyp-data-call-unavailable")),
             GrammarFamily::Abap => return Err(query_failure("query-abap-unmodeled-call")),
+            GrammarFamily::VbNet => return Err(query_failure("query-vbnet-unmodeled-call")),
             GrammarFamily::Vento => {
                 return Err(query_failure("query-vento-javascript-call-unavailable"));
             }
@@ -6105,6 +6139,7 @@ impl QueryPackRegistry {
             (GrammarFamily::Python, include_str!("../queries/python.scm")),
             (GrammarFamily::Gyp, include_str!("../queries/gyp.scm")),
             (GrammarFamily::Abap, include_str!("../queries/abap.scm")),
+            (GrammarFamily::VbNet, include_str!("../queries/vbnet.scm")),
             (GrammarFamily::Vento, include_str!("../queries/vento.scm")),
             (
                 GrammarFamily::JavaScript,

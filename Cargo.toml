@@ -51,6 +51,7 @@ members = [
     "xtask",
 ]
 exclude = [
+    "third_party/tree-sitter-vbnet-0.3.0",
     "third_party/tree-sitter-abap-0.1.0",
     "third_party/tree-sitter-vento-0.21.0",
     "native-grammars/dql",
@@ -299,6 +300,7 @@ tree-sitter-lua = { version = "=0.5.0", default-features = false }
 tree-sitter-php = { version = "=0.24.2", default-features = false }
 tree-sitter-python = { version = "=0.25.0", default-features = false }
 tree-sitter-abap = { path = "third_party/tree-sitter-abap-0.1.0", version = "=0.1.0", default-features = false }
+tree-sitter-vbnet = { path = "third_party/tree-sitter-vbnet-0.3.0", version = "=0.3.0", default-features = false }
 tree-sitter-vento = { path = "third_party/tree-sitter-vento-0.21.0", version = "=0.21.0", default-features = false }
 tree-sitter-ruby = { version = "=0.23.1", default-features = false }
 tree-sitter-rust = { version = "=0.24.2", default-features = false }

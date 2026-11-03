@@ -1,0 +1,29 @@
+# Local static binding; source acquisition and generation precede compilation.
+[package]
+name = "tree-sitter-vbnet"
+version = "0.3.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/repowise-dev/tree-sitter-vb-dotnet"
+description = "Pinned VB.NET grammar with a local static binding"
+publish = false
+build = "bindings/rust/build.rs"
+
+[workspace]
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "=0.1.7"
+
+[build-dependencies]
+cc = "=1.2.67"
+
+[dev-dependencies]
+tree-sitter = { version = "=0.26.11", default-features = false, features = ["std"] }
+
+[[test]]
+name = "vbnet_syntax"
+path = "../../tests/native-grammars/tests/vbnet_syntax.rs"

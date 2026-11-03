@@ -95,7 +95,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.104";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.105";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3090,6 +3090,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         language: "abap",
         suffixes: &[".abap"],
         aliases: &[],
+        detectors: &["extension", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "vbnet",
+        suffixes: &[".vb"],
+        aliases: &["visualbasicnet"],
         detectors: &["extension", "configuration"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
@@ -7509,6 +7517,80 @@ max_source_file_bytes = 2097152
         let capability = language_capabilities()
             .iter()
             .find(|capability| capability.language == "jsonc")
+            .unwrap();
+        assert_eq!(capability.maximum_tier, "tier_d");
+        assert_eq!(capability.analyzers, &["treesitter"]);
+    }
+
+    #[test]
+    fn vbnet_defaults_preserve_original_bytes_and_distinct_basic_dialects() {
+        let temporary = local_tempdir();
+        let original =
+            include_bytes!("../../../tests/native-grammars/fixtures/vbnet/TaskbarAnimate.vb");
+        write_fixture(&temporary, "TaskbarAnimate.vb", original);
+        write_fixture(&temporary, "upper.VB", original);
+        write_fixture(&temporary, "assigned.conf", original);
+        write_fixture(&temporary, "override.vb", b"def authored():\n    pass\n");
+        write_fixture(&temporary, "backup.vb.bak", original);
+        let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+            source: rootlight_config::ConfigSource::User,
+            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nconf='vbnet'\n[extensions.source-languages.data.paths]\n'override.vb'='python'\n",
+        }]).unwrap();
+        let root = fixture_root(&temporary, b"vbnet-discovery");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let manifest = discover(
+            &root,
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        for (path, evidence) in [
+            ("TaskbarAnimate.vb", LanguageEvidence::Extension),
+            ("upper.VB", LanguageEvidence::Extension),
+            ("assigned.conf", LanguageEvidence::Configuration),
+        ] {
+            let input = manifest
+                .inputs
+                .iter()
+                .find(|input| input.path == path)
+                .unwrap();
+            assert!(
+                input
+                    .language_signals
+                    .iter()
+                    .any(|signal| signal.language == "vbnet" && signal.evidence == evidence)
+            );
+            assert_eq!(input.bytes, u64::try_from(original.len()).unwrap());
+            assert_eq!(input.content_hash, rootlight_ids::content_hash(original));
+        }
+        let override_input = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "override.vb")
+            .unwrap();
+        assert!(
+            override_input
+                .language_signals
+                .iter()
+                .any(|s| s.language == "python" && s.evidence == LanguageEvidence::Configuration)
+        );
+        assert_eq!(canonical_language("vbnet"), Some("vbnet"));
+        assert_eq!(canonical_language("visualbasicnet"), Some("vbnet"));
+        assert_eq!(extension_language("native.VB"), Some("vbnet"));
+        for path in [
+            "legacy.bas",
+            "legacy.cls",
+            "script.vbs",
+            "backup.vb.bak",
+            "project.vbproj",
+        ] {
+            assert_ne!(extension_language(path), Some("vbnet"), "{path}");
+        }
+        let capability = language_capabilities()
+            .iter()
+            .find(|c| c.language == "vbnet")
             .unwrap();
         assert_eq!(capability.maximum_tier, "tier_d");
         assert_eq!(capability.analyzers, &["treesitter"]);
