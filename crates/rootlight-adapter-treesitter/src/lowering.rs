@@ -57,6 +57,7 @@ mod haskell_record_fields;
 mod haxe;
 mod hcl;
 mod hdl;
+mod hlsl_formals;
 mod html_closing_tags;
 mod idris;
 mod java_local_receivers;
@@ -979,6 +980,7 @@ fn required_syntax_fact_count_from_output(
             || java_local_receivers::required(fact)
             || cpp_const_formals::required(fact)
             || c_formal_reads::certified_reference(fact)
+            || hlsl_formals::certified_reference(fact)
             || gyp::required(fact)
             || vento::reference(fact)
             || c_variables::required(fact)
@@ -1776,11 +1778,14 @@ fn preflight_lowering_limits(
                     limits,
                 )?;
             }
-            if request.language().as_str() == "c"
+            if matches!(request.language().as_str(), "c" | "hlsl")
                 && request.included_ranges().is_empty()
                 && parse_output.report().coverage().status() != CoverageStatus::Unknown
                 && fact.kind() == SyntaxFactKind::Occurrence
-                && fact.syntax_kind().as_str() == "c.formal_return.reference"
+                && matches!(
+                    (request.language().as_str(), fact.syntax_kind().as_str()),
+                    ("c", "c.formal_return.reference") | ("hlsl", "hlsl.formal_value.reference")
+                )
             {
                 lexical_relation_candidates = checked_add(lexical_relation_candidates, 1)?;
                 field_relation_derivations = checked_add(field_relation_derivations, 3)?;
@@ -2009,6 +2014,10 @@ fn preflight_lowering_limits(
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
                         && (c_formal_reads::certified_reference(fact)
                             || c_variables::required(fact)))
+                    || (request.language().as_str() == "hlsl"
+                        && request.included_ranges().is_empty()
+                        && parse_output.report().coverage().status() != CoverageStatus::Unknown
+                        && hlsl_formals::certified_reference(fact))
                     || (request.language().as_str() == "ruby"
                         && request.included_ranges().is_empty()
                         && parse_output.report().coverage().status() != CoverageStatus::Unknown
@@ -4046,6 +4055,21 @@ impl<'context, 'source> Lowering<'context, 'source> {
             && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
         {
             Some(c_formal_reads::ParameterTargets::new(
+                self.coordinates.facts(),
+                &materialized,
+                self.full_source,
+                |span| self.text_for_span(span),
+                |span| self.coordinates.physical(span),
+                cancellation,
+            )?)
+        } else {
+            None
+        };
+        let hlsl_formals = if self.request.language().as_str() == "hlsl"
+            && self.request.included_ranges().is_empty()
+            && self.parse_output.report().coverage().status() != CoverageStatus::Unknown
+        {
+            Some(hlsl_formals::ParameterTargets::new(
                 self.coordinates.facts(),
                 &materialized,
                 self.full_source,
@@ -6102,6 +6126,27 @@ impl<'context, 'source> Lowering<'context, 'source> {
                     relations.insert(relation.id, relation);
                     if let Some(relation) =
                         c_formal_reads::read_relation(&occurrence, symbol, cancellation)?
+                    {
+                        relations.insert(relation.id, relation);
+                    }
+                }
+                if let Some(parameters) = &hlsl_formals
+                    && let Some(symbol) = parameters.resolve(
+                        fact,
+                        self.coordinates.physical(fact.span())?,
+                        &occurrence,
+                        enclosing_entity,
+                        text,
+                        cancellation,
+                    )?
+                {
+                    occurrence.target = OccurrenceTarget::Resolved { symbol };
+                    occurrence.id = derive_occurrence_record_id(&occurrence)
+                        .map_err(|_| provider_failure("hlsl-formal-occurrence-identity"))?;
+                    let relation = lexical_reference_relation(&occurrence, symbol)?;
+                    relations.insert(relation.id, relation);
+                    if let Some(relation) =
+                        hlsl_formals::read_relation(&occurrence, symbol, cancellation)?
                     {
                         relations.insert(relation.id, relation);
                     }
@@ -15464,7 +15509,11 @@ fn source_reference_gap(fact: &SyntaxFact) -> Option<&'static str> {
     if fact.kind() == SyntaxFactKind::Occurrence
         && matches!(
             fact.syntax_kind().as_str(),
-            "hlsl.identifier.reference" | "hlsl.member.reference" | "hlsl.unproven_call.reference"
+            "hlsl.identifier.reference"
+                | "hlsl.member.reference"
+                | "hlsl.unproven_call.reference"
+                | "hlsl.formal_binding.reference"
+                | "hlsl.formal_value.reference"
         )
     {
         return Some("hlsl-binding-and-dispatch-target-unavailable");
@@ -15975,14 +16024,18 @@ fn occurrence_role(fact: &SyntaxFact) -> Option<OccurrenceRole> {
         };
     }
     if fact.syntax_kind().as_str().starts_with("hlsl.") {
-        // The inherited C++ grammar does not establish import, call or binding roles.
+        // Only native own-formal certificates establish binding and value-use roles.
         return match (fact.kind(), fact.syntax_kind().as_str()) {
             (
                 SyntaxFactKind::Occurrence,
                 "hlsl.identifier.reference"
                 | "hlsl.member.reference"
-                | "hlsl.unproven_call.reference",
+                | "hlsl.unproven_call.reference"
+                | "hlsl.formal_binding.reference",
             ) => Some(OccurrenceRole::Reference),
+            (SyntaxFactKind::Occurrence, "hlsl.formal_value.reference") => {
+                Some(OccurrenceRole::Read)
+            }
             (SyntaxFactKind::Comment, "hlsl.comment.comment") => {
                 Some(OccurrenceRole::Documentation)
             }
@@ -18204,6 +18257,8 @@ mod tests {
             "hlsl.identifier.reference",
             "hlsl.member.reference",
             "hlsl.unproven_call.reference",
+            "hlsl.formal_binding.reference",
+            "hlsl.formal_value.reference",
         ] {
             let occurrence = fact(SyntaxFactKind::Occurrence, label);
             assert_eq!(
@@ -18212,7 +18267,11 @@ mod tests {
             );
             assert_eq!(
                 occurrence_role(&occurrence),
-                Some(OccurrenceRole::Reference)
+                Some(if label == "hlsl.formal_value.reference" {
+                    OccurrenceRole::Read
+                } else {
+                    OccurrenceRole::Reference
+                })
             );
             for kind in [
                 SyntaxFactKind::Signature,

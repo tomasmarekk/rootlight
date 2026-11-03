@@ -120,6 +120,19 @@ fn assert_sources(result: &AnalysisOutput, source: &str) {
                 OccurrenceTarget::Unresolved { .. }
             ));
         }
+        if matches!(
+            occurrence.syntax_kind.as_str(),
+            "hlsl.formal_binding.reference" | "hlsl.formal_value.reference"
+        ) {
+            assert_eq!(
+                occurrence.role,
+                if occurrence.syntax_kind == "hlsl.formal_value.reference" {
+                    OccurrenceRole::Read
+                } else {
+                    OccurrenceRole::Reference
+                }
+            );
+        }
         assert!(!matches!(
             occurrence.role,
             OccurrenceRole::CallSite | OccurrenceRole::ImportUse
@@ -130,12 +143,45 @@ fn assert_sources(result: &AnalysisOutput, source: &str) {
         result.report().coverage().status(),
         CoverageStatus::Complete
     );
-    assert!(
-        document
-            .relations
+    for relation in &document.relations {
+        if relation.predicate == RelationPredicate::Contains {
+            continue;
+        }
+        assert!(matches!(
+            relation.predicate,
+            RelationPredicate::RefersTo | RelationPredicate::Reads
+        ));
+        let occurrence = document
+            .occurrences
             .iter()
-            .all(|relation| relation.predicate == RelationPredicate::Contains)
-    );
+            .find(|site| {
+                relation.evidence.source.as_ref() == Some(&site.source)
+                    && matches!(
+                        site.syntax_kind.as_str(),
+                        "hlsl.formal_binding.reference" | "hlsl.formal_value.reference"
+                    )
+            })
+            .expect("new relations require the exact native formal certificate");
+        let OccurrenceTarget::Resolved { symbol } = occurrence.target else {
+            panic!("unresolved formals cannot donate a relation")
+        };
+        assert_eq!(relation.object, RelationEndpoint::Entity(symbol));
+        assert!(
+            document
+                .entities
+                .iter()
+                .any(|entity| entity.id == symbol && entity.kind == EntityKind::Parameter)
+        );
+        assert_eq!(
+            relation.subject,
+            if relation.predicate == RelationPredicate::Reads {
+                assert_eq!(occurrence.role, OccurrenceRole::Read);
+                RelationEndpoint::Entity(occurrence.enclosing.unwrap())
+            } else {
+                RelationEndpoint::Occurrence(occurrence.id)
+            }
+        );
+    }
 }
 
 fn output(source: &str) -> AnalysisOutput {
@@ -604,6 +650,16 @@ fn hlsl_namespace_containers_preserve_written_owners_and_unresolved_uses() {
         ["Seed", "Input", "Global", "Local", "Prototype", "Input"]
     );
     for occurrence in references {
+        if occurrence.syntax_kind == "hlsl.formal_binding.reference" {
+            assert_eq!(text(source, &occurrence.source), "Input");
+            assert_eq!(
+                occurrence.target,
+                OccurrenceTarget::Resolved {
+                    symbol: named(&result, "Input").id
+                }
+            );
+            continue;
+        }
         assert!(matches!(
             occurrence.target,
             OccurrenceTarget::Unresolved { .. }
@@ -638,6 +694,146 @@ fn hlsl_namespace_containers_preserve_written_owners_and_unresolved_uses() {
         FactDomain::Relations,
         "hlsl-buffer-binding-and-layout-unavailable",
         "cbuffer Bindings",
+    );
+}
+
+#[test]
+fn hlsl_original_random_formals_bind_without_inventing_intrinsic_directions() {
+    let source = include_str!("../fixtures/hlsl/random.hlsl");
+    assert_eq!(source.len(), 1021);
+    let result = output(source);
+    let document = result.document();
+    let use_at = |start, end| {
+        document
+            .occurrences
+            .iter()
+            .find(|site| {
+                site.source.span().start_byte() == start
+                    && site.source.span().end_byte() == end
+                    && site.role != OccurrenceRole::Definition
+            })
+            .unwrap()
+    };
+    let binding = use_at(476, 478);
+    assert_eq!(binding.role, OccurrenceRole::Reference);
+    assert_eq!(binding.syntax_kind, "hlsl.formal_binding.reference");
+    assert_eq!(
+        binding.target,
+        OccurrenceTarget::Resolved {
+            symbol: named(&result, "uv").id
+        }
+    );
+    let read = use_at(628, 630);
+    assert_eq!(read.role, OccurrenceRole::Read);
+    assert_eq!(read.syntax_kind, "hlsl.formal_value.reference");
+    assert_eq!(
+        read.target,
+        OccurrenceTarget::Resolved {
+            symbol: named(&result, "p3").id
+        }
+    );
+    assert!(document.relations.iter().any(|relation| {
+        relation.predicate == RelationPredicate::Reads
+            && relation.subject == RelationEndpoint::Entity(named(&result, "Hash33").id)
+            && relation.object == RelationEndpoint::Entity(named(&result, "p3").id)
+            && relation.evidence.source.as_ref() == Some(&read.source)
+    }));
+    for (start, end) in [(618, 620), (672, 674)] {
+        assert_eq!(use_at(start, end).role, OccurrenceRole::Reference);
+        assert!(
+            !document
+                .occurrences
+                .iter()
+                .any(|site| site.role == OccurrenceRole::Read
+                    && site.source.span() == use_at(start, end).source.span())
+        );
+    }
+    for (start, end) in [(463, 467), (472, 475), (480, 486), (867, 871)] {
+        assert!(matches!(
+            use_at(start, end).target,
+            OccurrenceTarget::Unresolved { .. }
+        ));
+    }
+    for site in [binding, read] {
+        assert!(!document.skipped_regions.iter().any(|gap| gap.detail
+            == "hlsl-binding-and-dispatch-target-unavailable"
+            && gap.source.span() == site.source.span()));
+    }
+    assert_gap(
+        &result,
+        source,
+        FactDomain::Relations,
+        "hlsl-preprocessor-selection-unavailable",
+        "#ifndef",
+    );
+    assert_gap(
+        &result,
+        source,
+        FactDomain::Relations,
+        "hlsl-body-binding-and-call-analysis-unavailable",
+        "p3 * float3",
+    );
+}
+
+#[test]
+fn hlsl_formal_binding_refuses_shadowing_collisions_and_preprocessor_uncertainty() {
+    for source in [
+        "float F(float Value) { float Value = 1.0; return Value + 1.0; }\n",
+        "float F(float Value) { { float Value; } return Value + 1.0; }\n",
+        "float F(float Value) { for (float Value : Values) { external(Value); } return Value; }\n",
+        "float F(float Value) { auto [Value, Other] = Pair; return Value; }\n",
+        "float F(float Value) { return Value<int>(1); }\n",
+        "float F(float Value) { return sizeof(Value + 1); }\n",
+        "float F(float Value) { return alignof(Value + 1); }\n",
+        "float F(float Value, float Value) { return Value + 1.0; }\n",
+        "float F(float Value) { return Value; } float F(float Other) { return Other; }\n",
+        "#define Value Replaced\nfloat F(float Value) { return Value + 1.0; }\n",
+        "#include \"external.hlsl\"\nfloat F(float Value) { return Value + 1.0; }\n",
+        "#if ACTIVE\nfloat F(float Value) { return Value + 1.0; }\n#endif\n",
+        "#ifndef GUARD\n#define GUARD\nfloat F(float Value) {\n#if ACTIVE\nfloat Value;\n#endif\nreturn Value; }\n#endif\n",
+        "#ifndef Value\n#define Value\nfloat F(float Value) { return Value; }\n#endif\n",
+        "#ifndef F\n#define F\nfloat F(float Value) { return Value; }\n#endif\n",
+        "#ifndef GUARD\n#define GUARD\nfloat F(float Value) { GUARD; return Value; }\n#endif\n",
+        "#ifndef float\n#define float\nfloat F(float Value) { return Value; }\n#endif\n",
+        "#ifndef GUARD\n#define GUARD\nnamespace GUARD { float F(float Value) { return Value; } }\n#endif\n",
+        "#ifndef GUARD\n#define OTHER\nfloat F(float Value) { return Value; }\n#endif\n",
+        "#ifndef GUARD\n#define GUARD 1\nfloat F(float Value) { return Value; }\n#endif\n",
+        "#ifndef GUARD\n#define GUARD\nfloat F(float Value) { return Value; }\n#else\nfloat Other;\n#endif\n",
+        "float F(float Value) { return Value + ; }\n",
+    ] {
+        let result = output(source);
+        assert!(
+            !result.document().occurrences.iter().any(|site| {
+                matches!(
+                    site.syntax_kind.as_str(),
+                    "hlsl.formal_binding.reference" | "hlsl.formal_value.reference"
+                )
+            }),
+            "{source}"
+        );
+        assert!(
+            !result.document().relations.iter().any(|relation| matches!(
+                relation.predicate,
+                RelationPredicate::Reads | RelationPredicate::RefersTo
+            )),
+            "{source}"
+        );
+    }
+    let source = "float F(float Value) { return value + Value; }\n";
+    let result = output(source);
+    let lower = result
+        .document()
+        .occurrences
+        .iter()
+        .find(|site| text(source, &site.source) == "value")
+        .unwrap();
+    assert!(matches!(lower.target, OccurrenceTarget::Unresolved { .. }));
+    assert!(
+        result
+            .document()
+            .occurrences
+            .iter()
+            .any(|site| site.role == OccurrenceRole::Read && text(source, &site.source) == "Value")
     );
 }
 
@@ -929,6 +1125,20 @@ fn hlsl_required_budget_conserves_complete_physical_identity_groups() {
     assert_definition(&result, source, "Scale", EntityKind::Function);
     assert_definition(&result, source, "Value", EntityKind::Parameter);
     assert_definition(&result, source, "Other", EntityKind::Variable);
+    let read = result
+        .document()
+        .occurrences
+        .iter()
+        .find(|site| site.role == OccurrenceRole::Read)
+        .unwrap();
+    assert_eq!(read.syntax_kind, "hlsl.formal_value.reference");
+    assert_eq!(text(source, &read.source), "Value");
+    assert_eq!(
+        read.target,
+        OccurrenceTarget::Resolved {
+            symbol: named(&result, "Value").id
+        }
+    );
     assert_eq!(
         signatures(&result, source, "Scale"),
         ["float Scale(float Value)"]

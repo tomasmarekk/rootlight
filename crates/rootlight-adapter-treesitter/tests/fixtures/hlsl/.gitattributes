@@ -1,0 +1,4 @@
+# Original shader and license identities include their physical CRLF bytes.
+# Exact-span regressions use the complete retained shader without translation.
+random.hlsl -text whitespace=cr-at-eol
+LICENSE.md -text whitespace=cr-at-eol

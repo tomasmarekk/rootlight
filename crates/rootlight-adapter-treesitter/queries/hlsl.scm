@@ -61,5 +61,12 @@
  (ERROR)] @expression
 
 [(identifier) (field_identifier)] @reference
+[(argument_list (identifier) @signature)
+ (binary_expression left: (identifier) @signature)
+ (binary_expression right: (identifier) @signature)
+ (assignment_expression left: (identifier) @signature)
+ (assignment_expression right: (identifier) @signature)
+ (field_expression argument: (identifier) @signature)
+ (return_statement (identifier) @signature)]
 (comment) @comment
 [(string_literal) (raw_string_literal) (char_literal)] @string

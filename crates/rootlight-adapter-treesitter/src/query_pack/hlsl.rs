@@ -1,5 +1,5 @@
-//! HLSL captures preserve complete physical owners and unresolved written uses.
-//! Native C++ recognition is not shader binding evidence; buffer labels never
+//! HLSL captures preserve physical owners and bounded native formal-use proofs.
+//! Inherited C++ recognition alone is not shader binding evidence; buffer labels never
 //! become entities, name occurrences or named scopes in this dedicated contract.
 //! Namespace bodies supply proven physical containment, not namespace identities.
 
@@ -26,6 +26,7 @@ struct CacheEntry {
     owner: Option<Option<OwnerProof>>,
     chain: Option<bool>,
     uses: Option<UseContext>,
+    formals: Option<HashMap<(usize, usize), bool>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,6 +41,8 @@ pub(super) struct CaptureCache {
     entries: HashMap<usize, CacheEntry>,
     maximum_entries: usize,
     exhausted: bool,
+    formal_file: Option<bool>,
+    formal_owners: HashMap<String, bool>,
 }
 
 impl CaptureCache {
@@ -49,6 +52,8 @@ impl CaptureCache {
             entries: HashMap::new(),
             maximum_entries,
             exhausted: false,
+            formal_file: None,
+            formal_owners: HashMap::new(),
         }
     }
 
@@ -171,11 +176,299 @@ impl CaptureCache {
         }
         Ok(context)
     }
+
+    fn formal_file(
+        &mut self,
+        mut root: Node<'_>,
+        source: &[u8],
+        cancellation: &Cancellation,
+    ) -> Result<bool, AdapterError> {
+        if let Some(checked) = self.formal_file {
+            return Ok(checked);
+        }
+        self.formal_file = Some(false);
+        while let Some(parent) = root.parent() {
+            cancellation.check()?;
+            root = parent;
+        }
+        if root.kind() != "translation_unit"
+            || !clean(root, source)
+            || root.end_byte() != source.len()
+            || !matches!(source.get(..root.start_byte()), Some(b"" | b"\xef\xbb\xbf"))
+        {
+            return Ok(false);
+        }
+        let mut guard = None;
+        let mut guard_define = None;
+        let mut guard_name = None;
+        let mut cursor = root.walk();
+        for child in root.named_children(&mut cursor) {
+            cancellation.check()?;
+            if child.kind() == "preproc_ifdef" {
+                if guard.is_some()
+                    || child.child(0).is_none_or(|token| token.kind() != "#ifndef")
+                    || field(child, "alternative").is_some()
+                {
+                    return Ok(false);
+                }
+                let Some(name) = field(child, "name").filter(|name| written_name(*name, source))
+                else {
+                    return Ok(false);
+                };
+                let mut body = child.walk();
+                let define = child
+                    .named_children(&mut body)
+                    .find(|node| *node != name && !node.is_extra());
+                let Some(define) = define.filter(|node| {
+                    node.kind() == "preproc_def"
+                        && field(*node, "value").is_none()
+                        && field(*node, "name")
+                            .is_some_and(|defined| text(defined, source) == text(name, source))
+                }) else {
+                    return Ok(false);
+                };
+                guard = Some(child.id());
+                guard_define = Some(define.id());
+                guard_name = Some(name.byte_range());
+            }
+        }
+        // An empty conventional file guard does not expand names in its body.
+        // Selection remains unevaluated; every other directive blocks binding.
+        let mut cursor = root.walk();
+        loop {
+            let node = cursor.node();
+            cancellation.check()?;
+            if !self.admit_entry(node.id())?
+                || (node.kind().starts_with("preproc_")
+                    && Some(node.id()) != guard
+                    && Some(node.id()) != guard_define)
+                || (guard.is_some()
+                    && node.parent() == Some(root)
+                    && !node.is_extra()
+                    && Some(node.id()) != guard)
+                || (guard_name.is_some()
+                    && guard_name
+                        .as_ref()
+                        .and_then(|span| source.get(span.clone()))
+                        == source.get(node.byte_range())
+                    && node.parent().is_some_and(|parent| {
+                        Some(parent.id()) != guard && Some(parent.id()) != guard_define
+                    }))
+            {
+                return Ok(false);
+            }
+            if node.kind() == "function_definition" {
+                let Some(proof) = self.owner(node, source, cancellation)? else {
+                    return Ok(false);
+                };
+                let Some(name) = proof.name.and_then(|span| source.get(span)) else {
+                    return Ok(false);
+                };
+                let Ok(name) = std::str::from_utf8(name) else {
+                    return Ok(false);
+                };
+                let mut owned = String::new();
+                owned
+                    .try_reserve_exact(name.len())
+                    .map_err(|_| SinkError::AllocationFailed)?;
+                owned.push_str(name);
+                self.formal_owners
+                    .try_reserve(1)
+                    .map_err(|_| SinkError::AllocationFailed)?;
+                self.formal_owners
+                    .entry(owned)
+                    .and_modify(|unique| *unique = false)
+                    .or_insert(true);
+            }
+            if cursor.goto_first_child() {
+                continue;
+            }
+            loop {
+                if cursor.goto_next_sibling() {
+                    break;
+                }
+                if !cursor.goto_parent() {
+                    self.formal_file = Some(true);
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    fn inspect_formals(
+        &mut self,
+        function: Node<'_>,
+        source: &[u8],
+        cancellation: &Cancellation,
+    ) -> Result<HashMap<(usize, usize), bool>, AdapterError> {
+        let mut uses = HashMap::new();
+        if !self.formal_file(function, source, cancellation)? {
+            return Ok(uses);
+        }
+        let Some(declarator) = field(function, "declarator") else {
+            return Ok(uses);
+        };
+        let Some(name) = declarator_name(declarator, source, cancellation)? else {
+            return Ok(uses);
+        };
+        if self
+            .formal_owners
+            .get(text(name, source).unwrap_or_default())
+            != Some(&true)
+        {
+            return Ok(uses);
+        }
+        let (Some(parameters), Some(body)) =
+            (field(declarator, "parameters"), field(function, "body"))
+        else {
+            return Ok(uses);
+        };
+        let mut names = HashMap::new();
+        let mut cursor = parameters.walk();
+        for parameter in parameters.named_children(&mut cursor) {
+            cancellation.check()?;
+            if parameter.is_extra() {
+                continue;
+            }
+            let Some(name) = field(parameter, "declarator") else {
+                return Ok(uses);
+            };
+            // Composite declarators need a separate binding proof.
+            if name.kind() != "identifier" || !parameter_shape(parameter, source, cancellation)? {
+                return Ok(uses);
+            }
+            let Some(name) = text(name, source) else {
+                return Ok(uses);
+            };
+            names
+                .try_reserve(1)
+                .map_err(|_| SinkError::AllocationFailed)?;
+            if names.insert(name, ()).is_some() {
+                return Ok(uses);
+            }
+        }
+        let mut cursor = body.walk();
+        loop {
+            let node = cursor.node();
+            cancellation.check()?;
+            if !self.admit_entry(node.id())?
+                || !clean(node, source)
+                || unsupported_cpp(node)
+                || matches!(
+                    node.kind(),
+                    "for_range_loop"
+                        | "structured_binding_declarator"
+                        | "template_function"
+                        | "template_instantiation"
+                        | "template_method"
+                        | "sizeof_expression"
+                        | "alignof_expression"
+                        | "decltype"
+                        | "noexcept"
+                        | "requires_expression"
+                        | "requires_clause"
+                        | "generic_expression"
+                        | "static_assert_declaration"
+                )
+            {
+                return Ok(HashMap::new());
+            }
+            if matches!(
+                node.kind(),
+                "identifier" | "field_identifier" | "type_identifier"
+            ) && text(node, source).is_some_and(|name| names.contains_key(name))
+            {
+                // A same-spelling binder anywhere in the body fences the owner,
+                // including an initializer before its declaration and nested blocks.
+                if self.uses(node, cancellation)? != UseContext::Expression {
+                    return Ok(HashMap::new());
+                }
+                if node.kind() == "identifier"
+                    && let Some(read) = formal_shape(node)
+                {
+                    uses.try_reserve(1)
+                        .map_err(|_| SinkError::AllocationFailed)?;
+                    uses.insert((node.start_byte(), node.end_byte()), read);
+                }
+            }
+            if cursor.goto_first_child() {
+                continue;
+            }
+            loop {
+                if cursor.node() == body {
+                    return Ok(uses);
+                }
+                if cursor.goto_next_sibling() {
+                    break;
+                }
+                if !cursor.goto_parent() {
+                    return Ok(HashMap::new());
+                }
+            }
+        }
+    }
+
+    fn formal_use(
+        &mut self,
+        node: Node<'_>,
+        source: &[u8],
+        cancellation: &Cancellation,
+    ) -> Result<Option<bool>, AdapterError> {
+        let mut ancestor = node.parent();
+        while let Some(function) = ancestor {
+            cancellation.check()?;
+            // Initializers are owned by their variable in public IR. Their
+            // enclosing-function reconstruction needs a separate native proof.
+            if function.kind() == "init_declarator" {
+                return Ok(None);
+            }
+            if function.kind() == "function_definition" {
+                if self
+                    .entries
+                    .get(&function.id())
+                    .is_none_or(|entry| entry.formals.is_none())
+                {
+                    let proof = self.inspect_formals(function, source, cancellation)?;
+                    if let Some(entry) = self.entries.get_mut(&function.id()) {
+                        entry.formals = Some(proof);
+                    }
+                }
+                return Ok(self
+                    .entries
+                    .get(&function.id())
+                    .and_then(|entry| entry.formals.as_ref())
+                    .and_then(|uses| uses.get(&(node.start_byte(), node.end_byte())))
+                    .copied());
+            }
+            ancestor = function.parent();
+        }
+        Ok(None)
+    }
 }
 
 fn field<'tree>(node: Node<'tree>, name: &str) -> Option<Node<'tree>> {
     node.child_by_field_name(name)
         .filter(|child| child.parent() == Some(node))
+}
+
+fn formal_shape(node: Node<'_>) -> Option<bool> {
+    let parent = node.parent()?;
+    match parent.kind() {
+        "return_statement" => Some(true),
+        "binary_expression"
+            if field(parent, "left") == Some(node) || field(parent, "right") == Some(node) =>
+        {
+            Some(true)
+        }
+        "assignment_expression"
+            if field(parent, "left") == Some(node) || field(parent, "right") == Some(node) =>
+        {
+            Some(false)
+        }
+        "argument_list" => Some(false),
+        "field_expression" if field(parent, "argument") == Some(node) => Some(false),
+        _ => None,
+    }
 }
 
 fn clean(node: Node<'_>, source: &[u8]) -> bool {
@@ -1011,6 +1304,14 @@ pub(super) fn retain_capture(
     if !cache.chain(node, source, cancellation)? {
         return Ok(false);
     }
+    if role == StructuralRole::Signature
+        && node.kind() == "identifier"
+        && declarator_parent(node).is_none()
+    {
+        return Ok(written_name(node, source)
+            && cache.uses(node, cancellation)? == UseContext::Expression
+            && cache.formal_use(node, source, cancellation)?.is_some());
+    }
     if matches!(
         role,
         StructuralRole::Declaration | StructuralRole::Definition | StructuralRole::Signature
@@ -1029,7 +1330,8 @@ pub(super) fn retain_capture(
                 parent.kind() != "field_expression"
                     || field(parent, "operator")
                         .is_some_and(|operator| text(operator, source) == Some("."))
-            }));
+            })
+            && cache.formal_use(node, source, cancellation)?.is_none());
     }
     Ok(role == StructuralRole::Scope
         && matches!(
@@ -1099,11 +1401,12 @@ fn expression_syntax(
 
 /// Preserves exact names, physical fragment extents and proven raw headers.
 ///
-/// Reference occurrences promise no resolved call, constructor or member target.
+/// Native formal certificates distinguish binding from unambiguous value use.
+/// Other references promise no resolved call, constructor or member target.
 /// Constant-buffer context spans include the raw header, label and binding bytes.
 pub(super) fn candidate(
     node: Node<'_>,
-    role: StructuralRole,
+    mut role: StructuralRole,
     source: &[u8],
     cancellation: &Cancellation,
     cache: &mut CaptureCache,
@@ -1122,6 +1425,16 @@ pub(super) fn candidate(
             range = proof.header;
         }
         syntax
+    } else if role == StructuralRole::Signature
+        && node.kind() == "identifier"
+        && declarator_parent(node).is_none()
+    {
+        role = StructuralRole::Reference;
+        match cache.formal_use(node, source, cancellation)? {
+            Some(true) => "hlsl.formal_value",
+            Some(false) => "hlsl.formal_binding",
+            None => return Err(query_failure("query-hlsl-formal-certificate")),
+        }
     } else if matches!(
         role,
         StructuralRole::Declaration | StructuralRole::Definition | StructuralRole::Signature
@@ -1159,7 +1472,11 @@ pub(super) fn candidate(
             {
                 "hlsl.member"
             }
-            _ => "hlsl.identifier",
+            _ => match cache.formal_use(node, source, cancellation)? {
+                Some(true) => "hlsl.formal_value",
+                Some(false) => "hlsl.formal_binding",
+                None => "hlsl.identifier",
+            },
         }
     } else {
         match role {
@@ -1180,7 +1497,8 @@ pub(super) fn candidate(
         end: range.end,
         role,
         syntax,
-        required: role.belongs_to_identity_closure(),
+        required: role.belongs_to_identity_closure()
+            || matches!(syntax, "hlsl.formal_binding" | "hlsl.formal_value"),
         native_depth: depth,
     })
 }
@@ -1520,6 +1838,57 @@ mod tests {
                 | StructuralRole::ScopedCall
                 | StructuralRole::Import
         )));
+    }
+
+    #[test]
+    fn own_formal_certificates_separate_binding_and_value_reads() {
+        let source = "float3 Hash(float3 p3) { p3 = frac(p3 * float3(1.0, 2.0, 3.0)); p3 += dot(p3, p3.yxz); return p3; }\n";
+        let (_, extraction) = extract(source, 1024);
+        let certified = extraction
+            .candidates
+            .iter()
+            .filter(|capture| matches!(capture.syntax, "hlsl.formal_binding" | "hlsl.formal_value"))
+            .collect::<Vec<_>>();
+        assert_eq!(certified.len(), 6);
+        assert_eq!(
+            certified
+                .iter()
+                .filter(|capture| capture.syntax == "hlsl.formal_value")
+                .count(),
+            2
+        );
+        assert!(certified.iter().all(|capture| capture.required));
+        let (_, required_only) = extract(source, 0);
+        let mut required_only = required_only
+            .candidates
+            .iter()
+            .filter(|capture| matches!(capture.syntax, "hlsl.formal_binding" | "hlsl.formal_value"))
+            .map(|capture| {
+                (
+                    capture.start,
+                    capture.end,
+                    capture.role,
+                    capture.syntax,
+                    capture.required,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut full = certified
+            .iter()
+            .map(|capture| {
+                (
+                    capture.start,
+                    capture.end,
+                    capture.role,
+                    capture.syntax,
+                    capture.required,
+                )
+            })
+            .collect::<Vec<_>>();
+        required_only.sort_unstable();
+        full.sort_unstable();
+        full.dedup();
+        assert_eq!(required_only, full);
     }
 
     #[test]
@@ -1880,11 +2249,14 @@ mod tests {
             names(source, &extraction.candidates, StructuralRole::Definition),
             ["Kept", "Input"]
         );
-        assert!(
-            !extraction
-                .candidates
-                .iter()
-                .any(|capture| capture.role == StructuralRole::Reference)
-        );
+        let references = extraction
+            .candidates
+            .iter()
+            .filter(|capture| capture.role == StructuralRole::Reference)
+            .collect::<Vec<_>>();
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].syntax, "hlsl.formal_value");
+        assert!(references[0].required);
+        assert_eq!(&source[references[0].start..references[0].end], "Input");
     }
 }

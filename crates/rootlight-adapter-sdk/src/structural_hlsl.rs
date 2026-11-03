@@ -46,7 +46,7 @@ pub(super) fn captured_name(text: &str, maximum_bytes: usize) -> Option<&str> {
     .then_some(text)
 }
 
-/// Borrows raw names only for exact definition and unresolved source-use labels.
+/// Borrows raw names only for exact definition and native written-use labels.
 ///
 /// Name admission does not resolve a call or member target. The caller proves
 /// capture context and source association; buffer labels are not name occurrences.
@@ -62,7 +62,9 @@ pub(super) fn captured_name_for_fact<'a>(
         "hlsl.name.definition"
         | "hlsl.identifier.reference"
         | "hlsl.member.reference"
-        | "hlsl.unproven_call.reference" => captured_name(text, maximum_bytes),
+        | "hlsl.unproven_call.reference"
+        | "hlsl.formal_binding.reference"
+        | "hlsl.formal_value.reference" => captured_name(text, maximum_bytes),
         _ => None,
     }
 }
@@ -110,11 +112,13 @@ mod tests {
         ("hlsl.struct.declaration", EntityKind::Struct),
     ];
 
-    const OCCURRENCES: [&str; 4] = [
+    const OCCURRENCES: [&str; 6] = [
         "hlsl.name.definition",
         "hlsl.identifier.reference",
         "hlsl.member.reference",
         "hlsl.unproven_call.reference",
+        "hlsl.formal_binding.reference",
+        "hlsl.formal_value.reference",
     ];
 
     fn fact(kind: SyntaxFactKind, label: &str) -> SyntaxFact {

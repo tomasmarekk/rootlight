@@ -1274,6 +1274,13 @@ impl QueryPack {
                             candidate.syntax,
                             "glsl.formal_value" | "glsl.direct_file_function"
                         ))
+                    || (family == GrammarFamily::Hlsl
+                        && candidate.required
+                        && candidate.role == StructuralRole::Reference
+                        && matches!(
+                            candidate.syntax,
+                            "hlsl.formal_binding" | "hlsl.formal_value"
+                        ))
                     || (family == GrammarFamily::StandardMl
                         && candidate.required
                         && candidate.role == StructuralRole::Reference
