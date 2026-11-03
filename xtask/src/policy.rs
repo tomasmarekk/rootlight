@@ -2230,6 +2230,111 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn local_dql_policy_fixture() -> (Metadata, SupplyChainPolicy) {
+        let root = PathBuf::from("/workspace");
+        let package = "rootlight-tree-sitter-dql@0.1.0";
+        let metadata = serde_json::from_value(serde_json::json!({
+            "packages": [{
+                "id": package,
+                "name": "rootlight-tree-sitter-dql",
+                "version": "0.1.0",
+                "source": null,
+                "manifest_path": root.join("native-grammars/dql/Cargo.toml"),
+                "license": "AGPL-3.0-only",
+                "dependencies": [],
+                "targets": [{
+                    "kind": ["custom-build"],
+                    "name": "build-script-build",
+                    "src_path": root.join("native-grammars/dql/bindings/rust/build.rs")
+                }],
+                "links": null
+            }],
+            "workspace_members": [],
+            "resolve": { "nodes": [{ "id": package }] },
+            "workspace_root": root,
+            "version": 1
+        }))
+        .expect("resolved nonmember grammar metadata decodes");
+        let mut policy: SupplyChainPolicy =
+            toml::from_str(include_str!("../../policy/supply-chain.toml"))
+                .expect("repository supply-chain policy decodes");
+        policy
+            .allowed_path_dependencies
+            .retain(|entry| entry.starts_with("rootlight-tree-sitter-dql@"));
+        policy
+            .allowed_build_scripts
+            .retain(|entry| entry.starts_with("rootlight-tree-sitter-dql@"));
+        policy.allowed_proc_macros.clear();
+        policy.allowed_native_links.clear();
+        (metadata, policy)
+    }
+
+    #[test]
+    fn dependency_surfaces_require_exact_local_grammar_paths() {
+        let (metadata, policy) = local_dql_policy_fixture();
+        validate_dependency_surfaces(&metadata, &policy)
+            .expect("reviewed local grammar is approved");
+
+        for change in ["missing approval", "moved manifest", "changed version"] {
+            let (mut metadata, mut policy) = local_dql_policy_fixture();
+            match change {
+                "missing approval" => policy.allowed_path_dependencies.clear(),
+                "moved manifest" => {
+                    metadata.packages[0].manifest_path = metadata
+                        .workspace_root
+                        .join("native-grammars/moved/Cargo.toml");
+                }
+                "changed version" => metadata.packages[0].version = "0.1.1".into(),
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(
+                    validate_dependency_surfaces(&metadata, &policy),
+                    Err(PolicyError::UnapprovedPathDependency { package, manifest })
+                        if package == package_key(&metadata.packages[0])
+                            && manifest == metadata.packages[0].manifest_path
+                ),
+                "{change}"
+            );
+        }
+    }
+
+    #[test]
+    fn dependency_surfaces_require_separate_local_build_approval() {
+        let (metadata, mut policy) = local_dql_policy_fixture();
+        policy.allowed_build_scripts.clear();
+        assert!(matches!(
+            validate_dependency_surfaces(&metadata, &policy),
+            Err(PolicyError::InventoryMismatch { kind: "build scripts", missing, unexpected })
+                if missing.is_empty()
+                    && unexpected == ["rootlight-tree-sitter-dql@0.1.0"]
+        ));
+    }
+
+    #[test]
+    fn dependency_surfaces_reject_stale_local_grammar_approvals() {
+        for surface in ["path dependencies", "build scripts"] {
+            let (metadata, mut policy) = local_dql_policy_fixture();
+            let stale = if surface == "path dependencies" {
+                let entry = "rootlight-tree-sitter-dql@0.1.0:native-grammars/old/Cargo.toml";
+                policy.allowed_path_dependencies.push(entry.into());
+                entry
+            } else {
+                let entry = "rootlight-tree-sitter-dql@0.0.9";
+                policy.allowed_build_scripts.push(entry.into());
+                entry
+            };
+            assert!(
+                matches!(
+                    validate_dependency_surfaces(&metadata, &policy),
+                    Err(PolicyError::InventoryMismatch { kind, missing, unexpected })
+                        if kind == surface && missing == [stale] && unexpected.is_empty()
+                ),
+                "{surface}"
+            );
+        }
+    }
+
     #[test]
     fn native_unsafe_boundaries_require_the_scanned_package() {
         for host in [
