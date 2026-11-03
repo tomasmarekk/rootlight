@@ -1,12 +1,15 @@
 (source_file) @root @module @signature
 (interface_definition) @scope @declaration @signature
 (interface_definition name: (identifier) @definition)
+(class_definition) @scope @declaration @signature
+(class_definition name: (identifier) @definition)
+(methods_declaration) @signature
 (method_entry) @declaration @signature
 (method_entry name: (identifier) @definition)
 (statement) @signature
 (data_declaration) @signature
 (inline_data_statement) @signature
-(class_definition) @signature
+(section_declaration) @signature
 (class_implementation) @signature
 (class_forward_declaration) @signature
 (interface_forward_declaration) @signature

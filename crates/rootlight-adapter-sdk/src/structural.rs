@@ -268,7 +268,11 @@ pub fn structural_entity_kind(fact: &SyntaxFact) -> Option<EntityKind> {
             (SyntaxFactKind::Declaration, "abap.interface.declaration") => {
                 Some(EntityKind::Interface)
             }
-            (SyntaxFactKind::Declaration, "abap.method.declaration") => Some(EntityKind::Method),
+            (SyntaxFactKind::Declaration, "abap.class.declaration") => Some(EntityKind::Class),
+            (
+                SyntaxFactKind::Declaration,
+                "abap.method.declaration" | "abap.static_method.declaration",
+            ) => Some(EntityKind::Method),
             _ => None,
         };
     }

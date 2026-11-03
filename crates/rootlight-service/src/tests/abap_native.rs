@@ -1,4 +1,4 @@
-//! Durable ABAP admission retains native interface facts and untyped-clause gaps.
+//! Durable ABAP admission retains native declarations and untyped-clause gaps.
 
 use super::*;
 use rootlight_storage::{
@@ -12,6 +12,162 @@ const ORIGINAL: &[u8] = include_bytes!(
 const DEFINITIONS: &[u8] = include_bytes!(
     "../../../../tests/native-grammars/fixtures/abap/zif_abapgit_definitions.intf.abap"
 );
+
+#[test]
+fn native_abap_class_owners_survive_reopen_without_implementation_duplicates() {
+    for (raw, class_name, method_name) in [
+        (
+            include_bytes!(
+                "../../../../tests/native-grammars/fixtures/abap/zcl_abapgit_object_tabl.clas.testclasses.abap"
+            )
+            .as_slice(),
+            "ltcl_ci",
+            "run",
+        ),
+        (
+            include_bytes!(
+                "../../../../tests/native-grammars/fixtures/abap/zcl_abapgit_diff_factory.clas.abap"
+            )
+            .as_slice(),
+            "zcl_abapgit_diff_factory",
+            "get",
+        ),
+    ] {
+        let repository = durable_test_tempdir();
+        let storage = durable_test_tempdir();
+        let paths =
+            RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime")).unwrap();
+        paths.prepare_owner().unwrap();
+        fs::write(repository.path().join("class.abap"), raw).unwrap();
+        let policy = FirstSliceStoragePolicy::resolve_user_config(None, 3).unwrap();
+        let assert_class = |service: &FirstSliceService, receipt: &FirstSliceIndexReceipt| {
+            let snapshot = service
+                .loaded_generation_snapshot(receipt.generation)
+                .unwrap();
+            let doc = snapshot.document();
+            assert_eq!(doc.files.len(), 1);
+            let file = &doc.files[0];
+            assert_eq!(file.language, "abap");
+            assert_eq!(file.content_hash, content_hash(raw));
+            let source = service
+                .source_read(
+                    receipt.generation,
+                    vec![file.evidence.source.clone().unwrap()],
+                    &deadline(),
+                )
+                .unwrap();
+            assert_eq!(source.data.chunks.len(), 1);
+            assert_eq!(source.data.chunks[0].bytes, raw);
+            let classes: Vec<_> = doc
+                .entities
+                .iter()
+                .filter(|e| e.kind == EntityKind::Class)
+                .collect();
+            let methods: Vec<_> = doc
+                .entities
+                .iter()
+                .filter(|e| e.kind == EntityKind::Method)
+                .collect();
+            assert_eq!(classes.len(), 1);
+            assert_eq!(methods.len(), 1);
+            let class = classes[0];
+            let method = methods[0];
+            assert_eq!(class.canonical_name, class_name);
+            assert_eq!(method.canonical_name, method_name);
+            assert_eq!(
+                method.container,
+                Some(rootlight_ir::ContainerRef::Entity(class.id))
+            );
+            for entity in [class, method] {
+                let sites: Vec<_> = doc
+                    .occurrences
+                    .iter()
+                    .filter(|site| {
+                        site.role == OccurrenceRole::Definition
+                            && site.target == OccurrenceTarget::Resolved { symbol: entity.id }
+                    })
+                    .collect();
+                assert_eq!(sites.len(), 1, "implementation must not duplicate its declaration");
+                let site = sites[0];
+                let span = site.source.span();
+                assert_eq!(site.source.content_hash(), content_hash(raw));
+                assert_eq!(
+                    raw.get(
+                        usize::try_from(span.start_byte()).unwrap()
+                            ..usize::try_from(span.end_byte()).unwrap()
+                    ),
+                    Some(entity.display_name.as_bytes())
+                );
+                assert_eq!(site.syntactic_text_hash, content_hash(entity.display_name.as_bytes()));
+            }
+            let relations: Vec<_> = doc
+                .relations
+                .iter()
+                .filter(|relation| {
+                    relation.predicate == RelationPredicate::Contains
+                        && relation.subject == RelationEndpoint::Entity(class.id)
+                        && relation.object == RelationEndpoint::Entity(method.id)
+                })
+                .collect();
+            assert_eq!(relations.len(), 1);
+            assert_eq!(
+                relations[0].evidence.source.as_ref().unwrap().content_hash(),
+                content_hash(raw)
+            );
+            assert!(doc.occurrences.iter().all(|site| {
+                matches!(site.role, OccurrenceRole::Definition | OccurrenceRole::Documentation)
+            }));
+            assert!(doc.skipped_regions.iter().any(|gap| {
+                gap.detail == "abap-class-header-bindings-unavailable"
+            }));
+            assert!(doc.skipped_regions.iter().any(|gap| {
+                gap.detail == "abap-native-construct-not-lowered"
+            }));
+            if method_name == "get" {
+                assert!(doc.skipped_regions.iter().any(|gap| {
+                    gap.detail == "abap-static-method-dispatch-bindings-unavailable"
+                }));
+            }
+            let cancel = deadline();
+            let context = GenerationContext::new(&cancel, GenerationBudget::default());
+            let directory = paths
+                .state_dir()
+                .join("first-slice/repositories")
+                .join(receipt.repository.to_string())
+                .join(receipt.generation.to_string());
+            let reader = rootlight_catalog::OracleReader::open_in(&directory, &context).unwrap();
+            for entity in [class, method] {
+                assert_eq!(reader.entity(entity.id, &context).unwrap().as_ref(), Some(entity));
+            }
+            (class.id, method.id)
+        };
+        let mut service =
+            FirstSliceService::new_durable_with_policy(policy.clone(), paths.state_dir(), &deadline())
+                .unwrap();
+        let fresh = service
+            .index_repository(repository.path(), &deadline())
+            .unwrap();
+        let identities = assert_class(&service, &fresh);
+        assert_eq!(
+            service
+                .index_repository(repository.path(), &deadline())
+                .unwrap()
+                .generation,
+            fresh.generation
+        );
+        drop(service);
+        let mut reopened =
+            FirstSliceService::new_durable_with_policy(policy, paths.state_dir(), &deadline()).unwrap();
+        assert_eq!(assert_class(&reopened, &fresh), identities);
+        assert_eq!(
+            reopened
+                .index_repository(repository.path(), &deadline())
+                .unwrap()
+                .generation,
+            fresh.generation
+        );
+    }
+}
 
 fn assert_generation(
     service: &FirstSliceService,

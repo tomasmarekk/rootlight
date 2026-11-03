@@ -1,4 +1,4 @@
-//! Admit only native interface owners and their direct, unqualified method names.
+//! Admit complete native owners and direct declarations without implementation inference.
 
 use rootlight_adapter_sdk::AdapterError;
 use rootlight_cancel::Cancellation;
@@ -23,20 +23,58 @@ fn named_owner(node: Node<'_>, source: &[u8]) -> bool {
     names.next().is_some_and(|name| ordinary_name(name, source)) && names.next().is_none()
 }
 
-fn direct_method(node: Node<'_>, source: &[u8]) -> bool {
-    node.kind() == "method_entry"
-        && named_owner(node, source)
-        && node.parent().is_some_and(|declaration| {
-            declaration.kind() == "methods_declaration"
-                && declaration.child_by_field_name("kind").is_some_and(|kind| {
-                    source
-                        .get(kind.byte_range())
-                        .is_some_and(|raw| raw.eq_ignore_ascii_case(b"methods"))
-                })
-                && declaration.parent().is_some_and(|owner| {
-                    owner.kind() == "interface_definition" && named_owner(owner, source)
-                })
-        })
+fn declaration_owner(node: Node<'_>, source: &[u8]) -> bool {
+    matches!(node.kind(), "interface_definition" | "class_definition") && named_owner(node, source)
+}
+
+fn declaration_kind(node: Node<'_>, source: &[u8]) -> Option<&'static str> {
+    if node.kind() != "methods_declaration" {
+        return None;
+    }
+    let owner = node
+        .parent()
+        .filter(|owner| declaration_owner(*owner, source))?;
+    let kind = node.child_by_field_name("kind")?;
+    let raw = source.get(kind.byte_range())?;
+    if raw.eq_ignore_ascii_case(b"methods") {
+        Some("abap.method")
+    } else if owner.kind() == "class_definition" && raw.eq_ignore_ascii_case(b"class-methods") {
+        Some("abap.static_method")
+    } else {
+        None
+    }
+}
+
+fn method_kind(node: Node<'_>, source: &[u8]) -> Option<&'static str> {
+    if node.kind() != "method_entry" || !named_owner(node, source) {
+        return None;
+    }
+    declaration_kind(node.parent()?, source)
+}
+
+fn class_header(
+    node: Node<'_>,
+    source: &[u8],
+    cancel: &Cancellation,
+) -> Result<Option<std::ops::Range<usize>>, AdapterError> {
+    let mut start = None;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        cancel.check()?;
+        if child.kind() == "definition" {
+            start = Some(child.end_byte());
+        } else if child.kind() == "." {
+            let Some(start) = start else {
+                return Ok(Some(node.byte_range()));
+            };
+            let span = start..child.start_byte();
+            return Ok(source
+                .get(span.clone())
+                .filter(|raw| raw.iter().any(|b| !b.is_ascii_whitespace()))
+                .map(|_| span));
+        }
+    }
+    Ok(Some(node.byte_range()))
 }
 
 pub(super) fn candidate(
@@ -60,19 +98,26 @@ pub(super) fn candidate(
         {
             "abap.interface"
         }
-        (StructuralRole::Declaration, "method_entry") if direct_method(node, source) => {
-            "abap.method"
+        (StructuralRole::Scope | StructuralRole::Declaration, "class_definition")
+            if named_owner(node, source) =>
+        {
+            "abap.class"
+        }
+        (StructuralRole::Declaration, "method_entry") => {
+            let Some(kind) = method_kind(node, source) else {
+                return Ok(None);
+            };
+            kind
         }
         (StructuralRole::Definition, "identifier") => match node.parent() {
             Some(owner)
-                if (owner.kind() == "interface_definition" && named_owner(owner, source))
-                    || direct_method(owner, source) =>
+                if declaration_owner(owner, source) || method_kind(owner, source).is_some() =>
             {
                 "abap.name"
             }
             _ => return Ok(None),
         },
-        (StructuralRole::Signature, "method_entry") if direct_method(node, source) => {
+        (StructuralRole::Signature, "method_entry") if method_kind(node, source).is_some() => {
             let Some(name) = node.child_by_field_name("name") else {
                 return Ok(None);
             };
@@ -84,6 +129,23 @@ pub(super) fn candidate(
                 return Ok(None);
             }
             "abap.method_contract"
+        }
+        (StructuralRole::Signature, "methods_declaration")
+            if declaration_kind(node, source) == Some("abap.static_method") =>
+        {
+            let Some(kind) = node.child_by_field_name("kind") else {
+                return Ok(None);
+            };
+            span = kind.byte_range();
+            "abap.static_dispatch"
+        }
+        (StructuralRole::Signature, "methods_declaration") => return Ok(None),
+        (StructuralRole::Signature, "class_definition") if named_owner(node, source) => {
+            let Some(header) = class_header(node, source, cancel)? else {
+                return Ok(None);
+            };
+            span = header;
+            "abap.class_header"
         }
         (StructuralRole::Signature, "source_file") => return Ok(None),
         (StructuralRole::Signature, "interface_definition") if named_owner(node, source) => {

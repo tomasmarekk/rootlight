@@ -119,7 +119,7 @@ pub enum GrammarFamily {
     Python,
     /// GYP literal build descriptions over the authenticated Python native AST.
     Gyp,
-    /// Native ABAP interface structure with explicit unmodeled-statement gaps.
+    /// Native ABAP owners and method declarations with explicit binding gaps.
     Abap,
     /// Native Vento host declarations without embedded JavaScript evaluation.
     Vento,

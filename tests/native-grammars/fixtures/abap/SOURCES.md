@@ -25,3 +25,24 @@ The same complete `LICENSE.ABAPGIT` notice applies. This second fixture retains
 the original source whose generic content hint previously selected C++ when
 `.abap` had no default route; it does not establish its unmodeled declarations'
 semantic coverage.
+
+The following class witnesses retain exact physical and Git bytes from the same
+pinned representative. The complete `LICENSE.ABAPGIT` notice applies to all four.
+They test native class owners and direct declaration methods; implementation,
+inheritance, visibility, member and dispatch bindings remain separately scoped.
+
+`zcl_abapgit_object_fugs.clas.abap` comes from `src/objects/zcl_abapgit_object_fugs.clas.abap`: 248 bytes,
+Git blob `e0d19655e31afd843048d3692b50d7b185068dbb`, SHA-256
+`d228d907133f5c99236cecd9a19d791924ee173b9220eb1a39ea8809df40a0b7`.
+
+`zcl_abapgit_object_tabl.clas.testclasses.abap` comes from `src/objects/tabl/zcl_abapgit_object_tabl.clas.testclasses.abap`: 248 bytes,
+Git blob `71ff7e28bcda2c34dbd43db691ee71960628aee3`, SHA-256
+`67bc1d8ca155b11718043a847dda86a5fd39b6221aeb50c3aed9f9c12edc9a93`.
+
+`zcl_abapgit_diff_factory.clas.abap` comes from `src/diff/zcl_abapgit_diff_factory.clas.abap`: 305 bytes,
+Git blob `0dcfd8b6efce8c6aff21e83d03d8a9c8a10e376a`, SHA-256
+`70945b405281979b1d05e800cb9564aa66e72abbb9ca5db06cbb93764fcb7250`.
+
+`zcl_abapgit_exit.clas.testclasses.abap` comes from `src/exits/zcl_abapgit_exit.clas.testclasses.abap`: 567 bytes,
+Git blob `8344033c74ca082f757712f92ccba856c9a67da3`, SHA-256
+`aa10aa06db1013fa9a1758610fa9b31a8b26ca82d66b478ca1cdb6db535659be`.
