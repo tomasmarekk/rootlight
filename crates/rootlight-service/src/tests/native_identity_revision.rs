@@ -178,7 +178,17 @@ fn vbnet_native_grammar_changes_invalidate_preceding_parser_digest() {
         .unwrap();
     let previous_source = "14c073f418cf8e0d89112459cf3aeb719d3a068c0e363b41606a43f46e1fce4c";
     let previous_parser = "4275d95f4ab7a55ce1064bae8648bdd203961b7de5de1ba02b7ae647ee58ad92";
+    let previous_attribute_source =
+        "60bee4d4965f34789777aae2da341fecf156e64135d98ae373c3416577fc4fab";
+    let previous_attribute_parser =
+        "5778ec353255c5fcc4035b10c3f02cb5456805b9c5aad0edc5493b0a98668c83";
     for (source, parser) in [
+        (previous_attribute_source, descriptor.parser_sha256()),
+        (
+            descriptor.grammar_source_sha256(),
+            previous_attribute_parser,
+        ),
+        (previous_attribute_source, previous_attribute_parser),
         (previous_source, descriptor.parser_sha256()),
         (descriptor.grammar_source_sha256(), previous_parser),
         (previous_source, previous_parser),

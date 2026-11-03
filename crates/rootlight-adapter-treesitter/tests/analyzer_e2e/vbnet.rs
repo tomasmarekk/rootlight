@@ -29,6 +29,88 @@ fn output_for(case: LanguageCase, raw: &[u8]) -> AnalysisOutput {
 }
 
 #[test]
+fn vbnet_attributes_preserve_native_definitions_spans_and_nested_owners() {
+    let raw = b"Public Class Owner\n<StructLayout(LayoutKind.Sequential)>\nPublic Class Child\nPublic Value As Integer\nEnd Class\nPublic Shared Function Check(ByVal handle As Integer) As <MarshalAs(UnmanagedType.Bool)> Boolean\nReturn True\nEnd Function\nEnd Class\n";
+    let output = output(raw);
+    let doc = output.document();
+    assert_eq!(doc.files[0].content_hash, content_hash(raw));
+    let owner = symbol_id_named(doc, "Owner");
+    let method = symbol_id_named(doc, "Check");
+    let module = doc
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Module)
+        .unwrap();
+    let module_source = module.evidence.source.as_ref().unwrap();
+    assert_eq!(module_source.span().file(), doc.files[0].id);
+    assert_eq!(module_source.generation(), doc.generation);
+    assert_eq!(module_source.content_hash(), content_hash(raw));
+    for (name, kind, start, end, container) in [
+        ("Owner", EntityKind::Class, 13, 18, Some(module.id)),
+        ("Child", EntityKind::Class, 70, 75, Some(owner)),
+        ("Check", EntityKind::Method, 133, 138, Some(owner)),
+        ("handle", EntityKind::Parameter, 145, 151, Some(method)),
+    ] {
+        let entity = doc
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        assert_eq!(entity.kind, kind);
+        assert_eq!(
+            entity.container,
+            container.map(rootlight_ir::ContainerRef::Entity)
+        );
+        let sites: Vec<_> = doc
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.target == OccurrenceTarget::Resolved { symbol: entity.id }
+            })
+            .collect();
+        assert_eq!(sites.len(), 1);
+        assert_eq!(
+            (
+                sites[0].source.span().start_byte(),
+                sites[0].source.span().end_byte()
+            ),
+            (start, end)
+        );
+        assert_eq!(sites[0].source.content_hash(), content_hash(raw));
+        assert_eq!(sites[0].source.span().file(), doc.files[0].id);
+        assert_eq!(sites[0].source.generation(), doc.generation);
+        assert_eq!(
+            doc.relations
+                .iter()
+                .filter(|relation| relation.predicate == RelationPredicate::Contains
+                    && relation.subject == RelationEndpoint::Entity(container.unwrap())
+                    && relation.object == RelationEndpoint::Entity(entity.id))
+                .count(),
+            1
+        );
+    }
+    assert!(
+        !doc.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "syntax-error-recovery")
+    );
+    assert!(!doc.entities.iter().any(|entity| matches!(
+        entity.canonical_name.as_str(),
+        "StructLayout" | "LayoutKind" | "Sequential" | "MarshalAs" | "UnmanagedType" | "Bool"
+    )));
+    assert!(!doc.relations.iter().any(|relation| matches!(
+        relation.predicate,
+        RelationPredicate::Calls | RelationPredicate::Reads | RelationPredicate::Writes
+    )));
+    assert!(
+        doc.skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "vbnet-statement-binding-and-call-analysis-unavailable")
+    );
+}
+
+#[test]
 fn vbnet_original_main_window_recovers_native_owners_without_body_bindings() {
     let case = LanguageCase {
         path: "native/MainWindow.xaml.vb",
@@ -459,6 +541,14 @@ fn vbnet_unsupported_contexts_do_not_fabricate_declarations_or_bindings() {
         "Class Broken\nSub Run()\n<A>\nStructure Invalid\nEnd Structure\nEnd Sub\nEnd Class\n",
         "Class Broken\n<Assembly: Marker>\nStructure Invalid\nEnd Structure\nEnd Class\n",
         "Class Broken\n<Module: Marker>\nStructure Invalid\nEnd Structure\nEnd Class\n",
+        "Class Broken\nSub Run()\n<Marker>\nClass Invalid\nEnd Class\nEnd Sub\nEnd Class\n",
+        "Class Broken\n<Assembly: Marker>\nClass Invalid\nEnd Class\nEnd Class\n",
+        "Class Broken\n<Module: Marker>\nClass Invalid\nEnd Class\nEnd Class\n",
+        "Class Broken\nFunction Read() As <Return: Marker> Boolean\nEnd Function\nEnd Class\n",
+        "Class Broken\nFunction Read() As <Marker>: Boolean\nEnd Function\nEnd Class\n",
+        "Class Broken\nProperty Value As <Marker>: Integer\nEnd Class\n",
+        "Class Broken\n<Marker>: Class Invalid\nEnd Class\nEnd Class\n",
+        "Class Broken\nPublic Value As <Marker> Boolean\nEnd Class\n",
         "#If False Then\nPublic Class ConditionalOwner\nEnd Class\n#End If\n",
         "Namespace Unproved.Path\nPublic Class Hidden\nEnd Class\nEnd Namespace\n",
     ] {

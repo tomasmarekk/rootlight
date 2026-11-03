@@ -17,6 +17,395 @@ const STYLE: &[u8] =
 const MAIN_WINDOW: &[u8] =
     include_bytes!("../../../../tests/native-grammars/fixtures/vbnet/MainWindow.xaml.vb");
 
+const ATTRIBUTED: &[u8] = b"Public Class Owner\n<StructLayout(LayoutKind.Sequential)>\nPublic Class Child\nPublic Value As Integer\nEnd Class\nPublic Shared Function Check(ByVal handle As Integer) As <MarshalAs(UnmanagedType.Bool)> Boolean\nReturn True\nEnd Function\nEnd Class\n";
+
+fn assert_attribute_generation(
+    service: &FirstSliceService,
+    receipt: &FirstSliceIndexReceipt,
+    raw: &[u8],
+) {
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let doc = snapshot.document();
+    assert_eq!(doc.files.len(), 1);
+    let file = &doc.files[0];
+    assert_eq!(file.language, "visual-basic-dotnet");
+    assert_eq!(file.content_hash, content_hash(raw));
+    let read = service
+        .source_read(
+            receipt.generation,
+            vec![file.evidence.source.clone().unwrap()],
+            &deadline(),
+        )
+        .unwrap();
+    assert_eq!(read.data.chunks[0].bytes, raw);
+    let owner = doc
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Owner")
+        .unwrap();
+    let method = doc
+        .entities
+        .iter()
+        .find(|entity| entity.canonical_name == "Check")
+        .unwrap();
+    let module = doc
+        .entities
+        .iter()
+        .find(|entity| entity.kind == EntityKind::Module)
+        .unwrap();
+    let module_source = module.evidence.source.as_ref().unwrap();
+    assert_eq!(module_source.span().file(), file.id);
+    assert_eq!(module_source.repository(), receipt.repository);
+    assert_eq!(module_source.generation(), receipt.generation);
+    assert_eq!(module_source.content_hash(), file.content_hash);
+    for (name, kind, start, end, container) in [
+        ("Owner", EntityKind::Class, 13, 18, Some(module.id)),
+        ("Child", EntityKind::Class, 70, 75, Some(owner.id)),
+        ("Check", EntityKind::Method, 133, 138, Some(owner.id)),
+        ("handle", EntityKind::Parameter, 145, 151, Some(method.id)),
+    ] {
+        let entity = doc
+            .entities
+            .iter()
+            .find(|entity| entity.canonical_name == name)
+            .unwrap();
+        assert_eq!(entity.kind, kind);
+        assert_eq!(
+            entity.container,
+            container.map(rootlight_ir::ContainerRef::Entity)
+        );
+        let sites: Vec<_> = doc
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.target == OccurrenceTarget::Resolved { symbol: entity.id }
+            })
+            .collect();
+        assert_eq!(sites.len(), 1);
+        assert_eq!(
+            (
+                sites[0].source.span().start_byte(),
+                sites[0].source.span().end_byte()
+            ),
+            (start, end)
+        );
+        assert_eq!(sites[0].source.content_hash(), file.content_hash);
+        assert_eq!(sites[0].source.span().file(), file.id);
+        assert_eq!(sites[0].source.repository(), receipt.repository);
+        assert_eq!(sites[0].source.generation(), receipt.generation);
+        assert_eq!(
+            doc.relations
+                .iter()
+                .filter(|relation| relation.predicate == RelationPredicate::Contains
+                    && relation.subject == RelationEndpoint::Entity(container.unwrap())
+                    && relation.object == RelationEndpoint::Entity(entity.id))
+                .count(),
+            1
+        );
+    }
+    assert!(
+        !doc.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "syntax-error-recovery")
+    );
+    assert!(!doc.entities.iter().any(|entity| matches!(
+        entity.canonical_name.as_str(),
+        "StructLayout"
+            | "LayoutKind"
+            | "Sequential"
+            | "MarshalAs"
+            | "UnmanagedType"
+            | "Bool"
+            | "VariantBool"
+    )));
+    assert!(!doc.relations.iter().any(|relation| matches!(
+        relation.predicate,
+        RelationPredicate::Calls | RelationPredicate::Reads | RelationPredicate::Writes
+    )));
+    assert!(
+        doc.skipped_regions
+            .iter()
+            .any(|gap| gap.detail == "vbnet-statement-binding-and-call-analysis-unavailable")
+    );
+}
+
+#[test]
+fn vbnet_attributes_survive_retained_noop_edit_restore_and_cold_reopen() {
+    let repository = durable_test_tempdir();
+    let storage = durable_test_tempdir();
+    let paths =
+        RuntimePaths::new(storage.path().join("state"), storage.path().join("runtime")).unwrap();
+    paths.prepare_owner().unwrap();
+    let input = repository.path().join("Attributes.vb");
+    fs::write(&input, ATTRIBUTED).unwrap();
+    let policy = FirstSliceStoragePolicy::resolve_user_config(None, 3).unwrap();
+    let mut service =
+        FirstSliceService::new_durable_with_policy(policy.clone(), paths.state_dir(), &deadline())
+            .unwrap();
+    let initial = service
+        .index_repository(repository.path(), &deadline())
+        .unwrap();
+    assert_attribute_generation(&service, &initial, ATTRIBUTED);
+    assert_eq!(
+        service
+            .index_repository(repository.path(), &deadline())
+            .unwrap()
+            .generation,
+        initial.generation
+    );
+    let changed = std::str::from_utf8(ATTRIBUTED)
+        .unwrap()
+        .replace("UnmanagedType.Bool", "UnmanagedType.VariantBool");
+    fs::write(&input, changed.as_bytes()).unwrap();
+    let update = service
+        .index_repository(repository.path(), &deadline())
+        .unwrap();
+    assert_ne!(update.generation, initial.generation);
+    assert_attribute_generation(&service, &update, changed.as_bytes());
+    assert_attribute_generation(&service, &initial, ATTRIBUTED);
+    drop(service);
+    let mut reopened =
+        FirstSliceService::new_durable_with_policy(policy.clone(), paths.state_dir(), &deadline())
+            .unwrap();
+    assert_attribute_generation(&reopened, &update, changed.as_bytes());
+    assert_eq!(
+        reopened
+            .index_repository(repository.path(), &deadline())
+            .unwrap()
+            .generation,
+        update.generation
+    );
+    fs::write(&input, ATTRIBUTED).unwrap();
+    let restored = reopened
+        .index_repository(repository.path(), &deadline())
+        .unwrap();
+    assert_eq!(restored.logical_snapshot, initial.logical_snapshot);
+    assert_attribute_generation(&reopened, &restored, ATTRIBUTED);
+    drop(reopened);
+    let mut final_open =
+        FirstSliceService::new_durable_with_policy(policy, paths.state_dir(), &deadline()).unwrap();
+    assert_attribute_generation(&final_open, &restored, ATTRIBUTED);
+    assert_eq!(
+        final_open
+            .index_repository(repository.path(), &deadline())
+            .unwrap()
+            .generation,
+        restored.generation
+    );
+}
+
+#[test]
+fn vbnet_attributes_keep_root_recovery_and_body_binding_gates() {
+    for raw in [
+        b"Class Broken\n<Assembly: Marker>\nClass Invalid\nEnd Class\nEnd Class\n".as_slice(),
+        b"Class Broken\nFunction Read() As <Return: Marker> Boolean\nEnd Function\nEnd Class\n"
+            .as_slice(),
+        b"Class Broken\nFunction Read() As <Marker>: Boolean\nEnd Function\nEnd Class\n".as_slice(),
+    ] {
+        let repository = durable_test_tempdir();
+        fs::write(repository.path().join("Broken.vb"), raw).unwrap();
+        let mut service = FirstSliceService::new(2).unwrap();
+        let receipt = service
+            .index_repository(repository.path(), &deadline())
+            .unwrap();
+        let snapshot = service
+            .loaded_generation_snapshot(receipt.generation)
+            .unwrap();
+        let doc = snapshot.document();
+        assert!(!doc.entities.iter().any(|entity| matches!(
+            entity.kind,
+            EntityKind::Class | EntityKind::Struct | EntityKind::Method | EntityKind::Parameter
+        )));
+        assert!(
+            doc.skipped_regions
+                .iter()
+                .any(|gap| gap.detail.starts_with("vbnet-"))
+        );
+        let read = service
+            .source_read(
+                receipt.generation,
+                vec![doc.files[0].evidence.source.clone().unwrap()],
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks[0].bytes, raw);
+    }
+}
+
+#[test]
+#[ignore = "requires ROOTLIGHT_VBNET_ORIGINAL_ROOT; verifies the original two-file subset only"]
+fn vbnet_attributes_original_subset_keeps_exact_native_owners() {
+    let original = std::path::PathBuf::from(
+        std::env::var_os("ROOTLIGHT_VBNET_ORIGINAL_ROOT").expect("original repository root"),
+    );
+    let repository = durable_test_tempdir();
+    let mut originals = Vec::new();
+    for (relative, private) in [
+        ("TaskbarX/TaskbarX/Win32.vb", "Win32.vb"),
+        ("TaskbarX/TaskbarX/TrayIconBuster.vb", "TrayIconBuster.vb"),
+    ] {
+        let bytes = fs::read(original.join(relative)).unwrap();
+        fs::write(repository.path().join(private), &bytes).unwrap();
+        originals.push((relative, private, bytes));
+    }
+    let mut service = FirstSliceService::new(2).unwrap();
+    let receipt = service
+        .index_repository(repository.path(), &deadline())
+        .unwrap();
+    let snapshot = service
+        .loaded_generation_snapshot(receipt.generation)
+        .unwrap();
+    let doc = snapshot.document();
+    assert_eq!(doc.files.len(), 2);
+    for (relative, private, raw) in &originals {
+        let file = doc.files.iter().find(|file| file.path == *private).unwrap();
+        assert_eq!(file.language, "visual-basic-dotnet");
+        assert_eq!(file.content_hash, content_hash(raw));
+        let read = service
+            .source_read(
+                receipt.generation,
+                vec![file.evidence.source.clone().unwrap()],
+                &deadline(),
+            )
+            .unwrap();
+        assert_eq!(read.data.chunks[0].bytes, *raw);
+        assert_eq!(fs::read(original.join(relative)).unwrap(), *raw);
+    }
+    let owner = |name: &str, kind| {
+        doc.entities
+            .iter()
+            .find(|entity| entity.canonical_name == name && entity.kind == kind)
+            .unwrap()
+            .id
+    };
+    let win32 = owner("Win32", EntityKind::Class);
+    let show_window = owner("ShowWindow", EntityKind::Method);
+    let tray_namespace = owner("TrayIconBuster", EntityKind::Namespace);
+    let tray = owner("TrayIconBuster", EntityKind::Class);
+    for (path, name, kind, start, end, parent) in [
+        ("Win32.vb", "Win32", EntityKind::Class, 99, 104, None),
+        (
+            "Win32.vb",
+            "ShowWindow",
+            EntityKind::Method,
+            166,
+            176,
+            Some(win32),
+        ),
+        (
+            "Win32.vb",
+            "hWnd",
+            EntityKind::Parameter,
+            177,
+            181,
+            Some(show_window),
+        ),
+        (
+            "TrayIconBuster.vb",
+            "TrayIconBuster",
+            EntityKind::Namespace,
+            80,
+            94,
+            None,
+        ),
+        (
+            "TrayIconBuster.vb",
+            "TrayIconBuster",
+            EntityKind::Class,
+            110,
+            124,
+            Some(tray_namespace),
+        ),
+        (
+            "TrayIconBuster.vb",
+            "ToolBarButton32",
+            EntityKind::Class,
+            5100,
+            5115,
+            Some(tray),
+        ),
+        (
+            "TrayIconBuster.vb",
+            "ToolBarButton64",
+            EntityKind::Class,
+            5425,
+            5440,
+            Some(tray),
+        ),
+    ] {
+        let file = doc.files.iter().find(|file| file.path == path).unwrap();
+        let container = parent.unwrap_or_else(|| {
+            doc.entities
+                .iter()
+                .find(|entity| {
+                    entity.kind == EntityKind::Module
+                        && entity
+                            .evidence
+                            .source
+                            .as_ref()
+                            .is_some_and(|source| source.span().file() == file.id)
+                })
+                .unwrap()
+                .id
+        });
+        let entity = doc
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.canonical_name == name
+                    && entity.kind == kind
+                    && entity.container == Some(rootlight_ir::ContainerRef::Entity(container))
+            })
+            .unwrap();
+        let sites: Vec<_> = doc
+            .occurrences
+            .iter()
+            .filter(|site| {
+                site.role == OccurrenceRole::Definition
+                    && site.target == OccurrenceTarget::Resolved { symbol: entity.id }
+            })
+            .collect();
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0].source.span().file(), file.id);
+        assert_eq!(sites[0].source.repository(), receipt.repository);
+        assert_eq!(sites[0].source.generation(), receipt.generation);
+        assert_eq!(sites[0].source.content_hash(), file.content_hash);
+        assert_eq!(
+            (
+                sites[0].source.span().start_byte(),
+                sites[0].source.span().end_byte()
+            ),
+            (start, end)
+        );
+        if let Some(parent) = parent {
+            assert!(
+                doc.relations
+                    .iter()
+                    .any(|relation| relation.predicate == RelationPredicate::Contains
+                        && relation.subject == RelationEndpoint::Entity(parent)
+                        && relation.object == RelationEndpoint::Entity(entity.id))
+            );
+        }
+    }
+    assert!(
+        !doc.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "syntax-error-recovery")
+    );
+    assert!(
+        !doc.entities
+            .iter()
+            .any(|entity| matches!(entity.canonical_name.as_str(), "StructLayout" | "MarshalAs"))
+    );
+    assert!(!doc.relations.iter().any(|relation| matches!(
+        relation.predicate,
+        RelationPredicate::Calls | RelationPredicate::Reads | RelationPredicate::Writes
+    )));
+}
+
 fn assert_main_window_generation(
     service: &FirstSliceService,
     receipt: &FirstSliceIndexReceipt,

@@ -158,6 +158,177 @@ fn attributed_structures_require_complete_type_member_placement() {
 }
 
 #[test]
+fn vbnet_attributes_keep_nested_class_spans_and_written_owners() {
+    let source = b"Public Class Owner\r\n<StructLayout(LayoutKind.Sequential)>\r\nPublic Class Child\r\nPublic Value As Integer\r\nEnd Class\r\nEnd Class\r\n";
+    let tree = parse(source);
+    let root = tree.root_node();
+    assert!(!root.has_error(), "{}", root.to_sexp());
+    let classes = nodes(root, "class_block");
+    assert_eq!(classes.len(), 2);
+    let owner = classes[0];
+    let child = classes[1];
+    assert_eq!(child.parent(), Some(owner));
+    let name = child.child_by_field_name("name").unwrap();
+    assert_eq!(name.byte_range(), 72..77);
+    assert_eq!(&source[name.byte_range()], b"Child");
+    let attributes = child.child_by_field_name("attributes").unwrap();
+    assert_eq!(attributes.start_byte(), 20);
+    assert_eq!(attributes.parent(), Some(child));
+    assert_eq!(nodes(child, "field_declaration").len(), 1);
+    assert!(classes.iter().all(|node| {
+        node.child_by_field_name("name")
+            .is_some_and(|name| &source[name.byte_range()] != b"StructLayout")
+    }));
+}
+
+#[test]
+fn vbnet_attributes_keep_function_return_type_and_parameter_spans() {
+    let source = b"Class Owner\nPublic Shared Function Check(ByVal handle As Integer) As <MarshalAs(UnmanagedType.Bool)> Boolean\nReturn True\nEnd Function\nEnd Class\n";
+    let tree = parse(source);
+    let root = tree.root_node();
+    assert!(!root.has_error(), "{}", root.to_sexp());
+    let methods = nodes(root, "method_declaration");
+    assert_eq!(methods.len(), 1);
+    let method = methods[0];
+    assert_eq!(method.parent().unwrap().kind(), "class_block");
+    let name = method.child_by_field_name("name").unwrap();
+    assert_eq!(name.byte_range(), 35..40);
+    assert_eq!(&source[name.byte_range()], b"Check");
+    let result = method.child_by_field_name("return_type").unwrap();
+    assert_eq!(result.byte_range(), 101..108);
+    assert_eq!(&source[result.byte_range()], b"Boolean");
+    let attributes = method.child_by_field_name("return_attributes").unwrap();
+    assert_eq!(attributes.start_byte(), 69);
+    assert_eq!(attributes.parent(), Some(method));
+    let parameters = nodes(method, "parameter");
+    assert_eq!(parameters.len(), 1);
+    let parameter = parameters[0].child_by_field_name("name").unwrap();
+    assert_eq!(parameter.byte_range(), 47..53);
+    assert_eq!(&source[parameter.byte_range()], b"handle");
+}
+
+#[test]
+fn vbnet_attributes_reject_nested_class_global_targets_and_illegal_placement() {
+    for source in [
+        "Class Owner\nSub Run()\n<A>\nClass Invalid\nEnd Class\nEnd Sub\nEnd Class\n",
+        "Class Owner\n<A>\nClass Incomplete\nEnd Class\n",
+        "Class Owner\n<Assembly: Marker>\nClass Invalid\nEnd Class\nEnd Class\n",
+        "Class Owner\n<Module: Marker>\nClass Invalid\nEnd Class\nEnd Class\n",
+        "Class Owner\n<Type: Marker>\nClass Invalid\nEnd Class\nEnd Class\n",
+        "Class Owner\nPublic <Marker> Class Invalid\nEnd Class\nEnd Class\n",
+    ] {
+        assert!(parse(source.as_bytes()).root_node().has_error(), "{source}");
+    }
+    let globals = b"<Assembly: Marker>\n<Module: Marker>\nClass Owner\nEnd Class\n";
+    assert!(!parse(globals).root_node().has_error());
+}
+
+#[test]
+fn vbnet_attributes_reject_return_targets_and_nonreturn_type_positions() {
+    for source in [
+        "Class Owner\nFunction Read() As <Assembly: Marker> Boolean\nEnd Function\nEnd Class\n",
+        "Class Owner\nFunction Read() As <Module: Marker> Boolean\nEnd Function\nEnd Class\n",
+        "Class Owner\nFunction Read() As <Return: Marker> Boolean\nEnd Function\nEnd Class\n",
+        "Class Owner\nFunction Read() As <Type: Marker> Boolean\nEnd Function\nEnd Class\n",
+        "Class Owner\nFunction Read() As <Method: Marker> Boolean\nEnd Function\nEnd Class\n",
+        "Class Owner\nFunction Read() <Marker> As Boolean\nEnd Function\nEnd Class\n",
+        "Class Owner\nFunction Read() As Boolean <Marker>\nEnd Function\nEnd Class\n",
+        "Class Owner\nSub Run() As <Marker> Boolean\nEnd Sub\nEnd Class\n",
+        "Class Owner\nDelegate Sub Run() As <Marker> Boolean\nEnd Class\n",
+        "Class Owner\nPublic Value As <Marker> Boolean\nEnd Class\n",
+        "Class Owner\nFunction Read(value As <Marker> Integer) As Boolean\nEnd Function\nEnd Class\n",
+        "Class Owner\nFunction Read() As <Marker>\nEnd Function\nEnd Class\n",
+        "Class Owner\nFunction Read() As\n<Marker> Boolean\nEnd Function\nEnd Class\n",
+        "Class Owner\nProperty Value As\n<Marker> Integer\nEnd Class\n",
+    ] {
+        assert!(parse(source.as_bytes()).root_node().has_error(), "{source}");
+    }
+}
+
+#[test]
+fn vbnet_attributes_preserve_supported_signature_sites_and_attribute_newlines() {
+    let source = b"Class Owner\nDelegate Function Callback() As <Marker> Boolean\nDeclare Function Native Lib \"user32.dll\" () As <Marker> Boolean\nPublic Property Value As <Marker> Integer\nPublic Function Continued() As _\n<Marker> Boolean\nEnd Function\n<\nMarker\n>\nPublic Class Child\nEnd Class\nEnd Class\n";
+    let tree = parse(source);
+    let root = tree.root_node();
+    assert!(!root.has_error(), "{}", root.to_sexp());
+    for kind in [
+        "delegate_declaration",
+        "external_declaration",
+        "method_declaration",
+    ] {
+        let declarations = nodes(root, kind);
+        assert_eq!(declarations.len(), 1, "{kind}");
+        assert!(
+            declarations[0]
+                .child_by_field_name("return_attributes")
+                .is_some(),
+            "{kind}"
+        );
+        let result = declarations[0].child_by_field_name("return_type").unwrap();
+        assert_eq!(&source[result.byte_range()], b"Boolean");
+    }
+    let properties = nodes(root, "property_declaration");
+    assert_eq!(properties.len(), 1);
+    let clauses = nodes(properties[0], "as_clause");
+    assert_eq!(clauses.len(), 1);
+    assert!(
+        clauses[0]
+            .child_by_field_name("return_attributes")
+            .is_some()
+    );
+    let result = clauses[0].child_by_field_name("type").unwrap();
+    assert_eq!(&source[result.byte_range()], b"Integer");
+    let classes = nodes(root, "class_block");
+    assert_eq!(classes.len(), 2);
+    assert_eq!(classes[1].parent(), Some(classes[0]));
+    assert!(classes[1].child_by_field_name("attributes").is_some());
+}
+
+#[test]
+fn vbnet_attributes_reject_colon_after_attribute_blocks() {
+    for source in [
+        "Class Owner\nFunction Read() As <Marker>: Boolean\nEnd Function\nEnd Class\n",
+        "Class Owner\nProperty Value As <Marker>: Integer\nEnd Class\n",
+        "Class Owner\n<Marker>: Class Child\nEnd Class\nEnd Class\n",
+        "Class Owner\n<Marker>: Structure Child\nEnd Structure\nEnd Class\n",
+        "<Marker>: Class Owner\nEnd Class\n",
+    ] {
+        assert!(parse(source.as_bytes()).root_node().has_error(), "{source}");
+    }
+    let statements = b"Imports System:Class Owner:Sub Run():Return:End Sub:End Class\n";
+    assert!(!parse(statements).root_node().has_error());
+}
+
+#[test]
+fn vbnet_attributes_keep_global_colon_statements_separate_from_classes() {
+    for target in ["Assembly", "Module"] {
+        let source = format!("<{target}: Marker>: Class Owner\nEnd Class\n");
+        let tree = parse(source.as_bytes());
+        let root = tree.root_node();
+        assert!(!root.has_error(), "{source}: {}", root.to_sexp());
+        let classes = nodes(root, "class_block");
+        assert_eq!(classes.len(), 1);
+        assert!(classes[0].child_by_field_name("attributes").is_none());
+        let attributes = nodes(root, "attribute_block");
+        assert_eq!(attributes.len(), 1);
+        assert_eq!(attributes[0].parent(), Some(root));
+        let entries = nodes(attributes[0], "attribute");
+        assert_eq!(entries.len(), 1);
+        let actual = entries[0].child_by_field_name("target").unwrap();
+        assert_eq!(&source.as_bytes()[actual.byte_range()], target.as_bytes());
+        let eof = format!("<{target}: Marker>");
+        let eof_tree = parse(eof.as_bytes());
+        assert!(
+            !eof_tree.root_node().has_error(),
+            "{eof}: {}",
+            eof_tree.root_node().to_sexp()
+        );
+        let joined = format!("<{target}: Marker> Class Owner\nEnd Class\n");
+        assert!(parse(joined.as_bytes()).root_node().has_error(), "{joined}");
+    }
+}
+
+#[test]
 fn mixed_case_keywords_parse_and_incomplete_owner_keeps_recovery() {
     let tree =
         parse(b"pUbLiC cLaSs Owner\npUbLiC sUb Run(ByVal Value As Integer)\nEnD sUb\nEnD cLaSs\n");
@@ -244,35 +415,64 @@ fn inspect_original_vbnet_parser_recovery() {
         std::env::var_os("ROOTLIGHT_VBNET_ORIGINAL_ROOT").expect("original repository root"),
     );
     for path in [
+        "TaskbarX/TaskbarX/Easings.vb",
         "TaskbarX/TaskbarX/Main.vb",
         "TaskbarX/TaskbarX/MSAA.vb",
+        "TaskbarX/TaskbarX/My Project/Application.Designer.vb",
+        "TaskbarX/TaskbarX/My Project/AssemblyInfo.vb",
+        "TaskbarX/TaskbarX/My Project/Resources.Designer.vb",
+        "TaskbarX/TaskbarX/My Project/Settings.Designer.vb",
+        "TaskbarX/TaskbarX/Settings.vb",
+        "TaskbarX/TaskbarX/TaskbarAnimate.vb",
         "TaskbarX/TaskbarX/TaskbarCenter.vb",
         "TaskbarX/TaskbarX/TaskbarStyle.vb",
         "TaskbarX/TaskbarX/TrayIconBuster.vb",
         "TaskbarX/TaskbarX/Win32.vb",
+        "TaskbarX Configurator/TaskbarX Configurator/Application.xaml.vb",
+        "TaskbarX Configurator/TaskbarX Configurator/Easings.vb",
         "TaskbarX Configurator/TaskbarX Configurator/MainWindow.xaml.vb",
+        "TaskbarX Configurator/TaskbarX Configurator/My Project/AssemblyInfo.vb",
+        "TaskbarX Configurator/TaskbarX Configurator/My Project/Resources.Designer.vb",
+        "TaskbarX Configurator/TaskbarX Configurator/My Project/Settings.Designer.vb",
     ] {
         let source = std::fs::read(directory.join(path)).expect("original source bytes");
         let tree = parse(&source);
         let root = tree.root_node();
         let errors = nodes(root, "ERROR");
+        let mut missing = Vec::new();
+        let mut pending = vec![root];
+        while let Some(node) = pending.pop() {
+            if node.is_missing() {
+                missing.push(node);
+            }
+            let mut cursor = node.walk();
+            pending.extend(node.children(&mut cursor));
+        }
+        missing.sort_by_key(Node::start_byte);
         eprintln!(
-            "ORIGINAL {path}: bytes={} complete={} external={} methods={} errors={}",
+            "ORIGINAL {path}: bytes={} complete={} external={} methods={} errors={} missing={}",
             source.len(),
             !root.has_error(),
             nodes(root, "external_declaration").len(),
             nodes(root, "method_declaration").len(),
-            errors.len()
+            errors.len(),
+            missing.len()
         );
-        for error in errors.iter().take(4) {
+        for error in errors.iter().chain(&missing) {
             let end = error.end_byte().min(error.start_byte().saturating_add(120));
             eprintln!(
-                "RECOVERY {}..{} line={} text={:?}",
+                "RECOVERY {} {}..{} line={} text={:?}",
+                error.kind(),
                 error.start_byte(),
                 error.end_byte(),
                 error.start_position().row + 1,
                 String::from_utf8_lossy(&source[error.start_byte()..end])
             );
         }
+        assert_eq!(
+            std::fs::read(directory.join(path)).unwrap(),
+            source,
+            "original bytes changed: {path}"
+        );
     }
 }

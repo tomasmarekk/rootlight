@@ -8,7 +8,7 @@
      [$.type, $.invocation],
      [$.type] ,
      [$.new_expression] ,
-@@ -35,11 +36,21 @@
+@@ -35,11 +36,22 @@
      [$.label_statement, $.expression],
      [$.event_declaration],
      [$.if_statement],
@@ -27,10 +27,48 @@
 +    [$.namespace_name, $.attribute, $.type_attribute],
 +    [$.attribute, $.type_attribute],
 +    [$.namespace_name, $.type_attribute],
++    [$.namespace_name, $._global_attribute],
      [$.namespace_name],
      [$.namespace_name, $.expression],
      [$.type, $.new_expression],
-@@ -147,7 +158,7 @@
+@@ -58,15 +70,16 @@
+     
+     // `Option` and `Imports` lines are not required to lead the file: comments,
+     // blank lines and any order between the two are all legal VB.NET.
+-    source_file: $ => repeat(choice(
++    source_file: $ => seq(repeat(choice(
+       $.option_statements,
+       $.imports_statement,
+       $.attribute_block,
++      alias($._global_attribute_statement, $.attribute_block),
+       $.namespace_block,
+       $.type_declaration,
+       $.preprocessor_directive,
+-      alias($._terminator, $.blank_line)
+-    )),
++      alias($._newline, $.blank_line)
++    )), optional(alias($._global_attribute_block, $.attribute_block))),
+ 
+     // One `Option` line. The plural name is kept for query compatibility.
+     option_statements: $ => seq(
+@@ -122,13 +135,14 @@
+         $.namespace_block,
+         $.imports_statement,  // Allow imports inside namespace
+         $.preprocessor_directive,
+-        alias($._terminator, $.blank_line)  // Allow blank lines
++        alias($._newline, $.blank_line)  // Allow blank lines
+       )),
+       kw('End'), kw('Namespace'), optional($._terminator)
+     )),
+ 
+     // Class definition block
+-    class_block: $ => prec.right(seq(
++    class_block: $ => prec.right(1, seq(
++      optional(field('attributes', $.type_attribute_block)),
+       field('modifiers', optional($.modifiers)),
+       kw('Class'),
+       field('name', $.identifier),
+@@ -147,7 +161,7 @@
          field('implements', $.implements_clause)
        )),
        $._terminator,
@@ -39,7 +77,7 @@
        kw('End'), kw('Class'), optional($._terminator)
      )),
  
-@@ -157,12 +168,13 @@
+@@ -157,12 +171,13 @@
        kw('Module'),
        field('name', $.identifier),
        $._terminator,
@@ -55,7 +93,7 @@
        field('modifiers', optional($.modifiers)),
        kw('Structure'),
        field('name', $.identifier),
-@@ -172,7 +184,7 @@
+@@ -172,7 +187,7 @@
          field('implements', $.implements_clause)
        )),
        $._terminator,
@@ -64,10 +102,56 @@
        kw('End'), kw('Structure'), optional($._terminator)
      )),
  
-@@ -270,9 +282,23 @@
+@@ -211,11 +226,10 @@
+     delegate_declaration: $ => seq(
+       field('modifiers', optional($.modifiers)),
+       kw('Delegate'),
+-      choice(kw('Sub'), kw('Function')),
+-      field('name', $.identifier),
+-      optional($.type_parameters),
+-      field('parameters', $.parameter_list),
+-      optional(seq(kw('As'), field('return_type', $.type))),  // only for Function delegate
++      choice(
++        seq(kw('Sub'), $._callable_signature),
++        seq(kw('Function'), $._callable_signature, optional($._return_type_clause))
++      ),
+       $._terminator
+     ),
+ 
+@@ -256,8 +270,8 @@
+       commaSep1($.attribute),
+       optional($._newline),
+       '>',
+-      // A trailing `_` line continuation eats the newline, so it may be absent.
+-      optional($._terminator)
++      // Continuation may consume the newline; a colon cannot end an attribute list.
++      optional($._newline)
+     )),
+     // attribute: $ => seq(
+     //   optional(seq(field('target', $.identifier), ':')),  // e.g., Assembly: or Module: target
+@@ -270,9 +284,54 @@
        optional($.argument_list)
      ),
  
++    // Explicit file-level targets are statements and may end with a colon.
++    _global_attribute_statement: $ => seq(
++      $._global_attribute_block,
++      $._terminator
++    ),
++    _global_attribute_block: $ => seq(
++      '<',
++      optional($._newline),
++      commaSep1(alias($._global_attribute, $.attribute)),
++      optional($._newline),
++      '>'
++    ),
++    _global_attribute: $ => seq(
++      field('target', alias(choice(kw('Assembly'), kw('Module')), $.identifier)),
++      ':',
++      field('name', choice($.identifier, $.namespace_name)),
++      optional($.argument_list)
++    ),
++
 +    // Global Assembly/Module targets cannot attach to nested type declarations.
 +    type_attribute_block: $ => prec.right(seq(
 +      '<',
@@ -75,11 +159,23 @@
 +      commaSep1($.type_attribute),
 +      optional($._newline),
 +      '>',
-+      optional($._terminator)
++      optional($._newline)
 +    )),
 +    type_attribute: $ => seq(
 +      field('name', choice($.identifier, $.namespace_name)),
 +      optional($.argument_list)
++    ),
++
++    // Return attributes belong to signatures, never to arbitrary type uses.
++    _return_type_clause: $ => seq(
++      kw('As'),
++      optional(field('return_attributes', $.type_attribute_block)),
++      field('return_type', $.type)
++    ),
++    _attributed_property_as_clause: $ => seq(
++      kw('As'),
++      field('return_attributes', $.type_attribute_block),
++      field('type', $.type)
 +    ),
 +
      // Modifiers (public/private/etc.). Multiple modifiers can appear in sequence.
@@ -89,7 +185,7 @@
        kw('Public'), kw('Private'), kw('Protected'), kw('Friend'),
        kw('Shared'), kw('Shadows'), kw('Static'),
        kw('Overloads'), kw('Overrides'), kw('Overridable'), kw('NotOverridable'), kw('MustOverride'),
-@@ -281,7 +307,7 @@
+@@ -281,7 +340,7 @@
        kw('Default'),              // for default properties
        kw('ReadOnly'), kw('WriteOnly'),
        kw('WithEvents'), kw('Async'), kw('Iterator')
@@ -98,10 +194,31 @@
  
      // Type member declarations inside class/module/etc.
      _member_declaration: $ => choice(
-@@ -430,6 +456,30 @@
+@@ -417,11 +476,10 @@
+     method_declaration: $ => seq(
+       optional(field('attributes', $.attribute_block)),
+       field('modifiers', optional($.modifiers)),
+-      choice(kw('Sub'), kw('Function')),
+-      field('name', $.identifier),
+-      optional($.type_parameters),
+-      field('parameters', $.parameter_list),
+-      optional(seq(kw('As'), field('return_type', $.type))),  // only for Function
++      choice(
++        seq(kw('Sub'), $._callable_signature),
++        seq(kw('Function'), $._callable_signature, optional($._return_type_clause))
++      ),
+       optional($.implements_clause),
+       optional($.handles_clause),
+       choice(
+@@ -430,6 +488,35 @@
          // Without body (e.g., abstract method in MustInherit class, or interface method):
          $._terminator
        )
++    ),
++    _callable_signature: $ => seq(
++      field('name', $.identifier),
++      optional($.type_parameters),
++      field('parameters', $.parameter_list)
 +    ),
 +
 +    // External references have no body and are valid only in type/module members.
@@ -113,7 +230,7 @@
 +      choice(
 +        seq(kw('Sub'), $._external_signature),
 +        seq(kw('Function'), $._external_signature,
-+          optional(seq(kw('As'), field('return_type', $.type))))
++          optional($._return_type_clause))
 +      ),
 +      $._terminator
 +    ),
@@ -129,7 +246,16 @@
      ),
  
      // Constructor (Sub New) declaration
-@@ -593,6 +643,7 @@
+@@ -451,7 +538,7 @@
+       kw('Property'),
+       field('name', $.identifier),
+       optional(field('parameters', $.parameter_list)),  // indexed properties
+-      optional($.as_clause),
++      optional(choice($.as_clause, alias($._attributed_property_as_clause, $.as_clause))),
+       optional($.implements_clause),
+       choice(
+         // Auto-property or declaration without body:
+@@ -593,6 +680,7 @@
        $.raise_event_statement,
        $.erase_statement,
        $.stop_statement,
@@ -137,7 +263,7 @@
        $.on_error_statement,
        $.preprocessor_directive,  // allow preprocessor directives in code flow
        $.compound_assignment_statement,
-@@ -888,6 +939,8 @@
+@@ -888,6 +976,8 @@
      ),
      erase_statement: $ => seq(kw('Erase'), commaSep1($.expression), $._terminator),
      stop_statement: $ => seq(kw('Stop'), $._terminator),

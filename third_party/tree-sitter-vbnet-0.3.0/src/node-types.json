@@ -168,6 +168,16 @@
     "type": "as_clause",
     "named": true,
     "fields": {
+      "return_attributes": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "type_attribute_block",
+            "named": true
+          }
+        ]
+      },
       "type": {
         "multiple": false,
         "required": true,
@@ -506,6 +516,16 @@
     "type": "class_block",
     "named": true,
     "fields": {
+      "attributes": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "type_attribute_block",
+            "named": true
+          }
+        ]
+      },
       "implements": {
         "multiple": true,
         "required": false,
@@ -827,6 +847,16 @@
         "types": [
           {
             "type": "parameter_list",
+            "named": true
+          }
+        ]
+      },
+      "return_attributes": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "type_attribute_block",
             "named": true
           }
         ]
@@ -1280,6 +1310,16 @@
         "types": [
           {
             "type": "parameter_list",
+            "named": true
+          }
+        ]
+      },
+      "return_attributes": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "type_attribute_block",
             "named": true
           }
         ]
@@ -2207,6 +2247,16 @@
         "types": [
           {
             "type": "parameter_list",
+            "named": true
+          }
+        ]
+      },
+      "return_attributes": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "type_attribute_block",
             "named": true
           }
         ]

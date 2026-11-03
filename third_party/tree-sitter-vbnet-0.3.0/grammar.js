@@ -51,6 +51,7 @@ module.exports = grammar({
     [$.namespace_name, $.attribute, $.type_attribute],
     [$.attribute, $.type_attribute],
     [$.namespace_name, $.type_attribute],
+    [$.namespace_name, $._global_attribute],
     [$.namespace_name],
     [$.namespace_name, $.expression],
     [$.type, $.new_expression],
@@ -69,15 +70,16 @@ module.exports = grammar({
     
     // `Option` and `Imports` lines are not required to lead the file: comments,
     // blank lines and any order between the two are all legal VB.NET.
-    source_file: $ => repeat(choice(
+    source_file: $ => seq(repeat(choice(
       $.option_statements,
       $.imports_statement,
       $.attribute_block,
+      alias($._global_attribute_statement, $.attribute_block),
       $.namespace_block,
       $.type_declaration,
       $.preprocessor_directive,
-      alias($._terminator, $.blank_line)
-    )),
+      alias($._newline, $.blank_line)
+    )), optional(alias($._global_attribute_block, $.attribute_block))),
 
     // One `Option` line. The plural name is kept for query compatibility.
     option_statements: $ => seq(
@@ -133,13 +135,14 @@ module.exports = grammar({
         $.namespace_block,
         $.imports_statement,  // Allow imports inside namespace
         $.preprocessor_directive,
-        alias($._terminator, $.blank_line)  // Allow blank lines
+        alias($._newline, $.blank_line)  // Allow blank lines
       )),
       kw('End'), kw('Namespace'), optional($._terminator)
     )),
 
     // Class definition block
-    class_block: $ => prec.right(seq(
+    class_block: $ => prec.right(1, seq(
+      optional(field('attributes', $.type_attribute_block)),
       field('modifiers', optional($.modifiers)),
       kw('Class'),
       field('name', $.identifier),
@@ -223,11 +226,10 @@ module.exports = grammar({
     delegate_declaration: $ => seq(
       field('modifiers', optional($.modifiers)),
       kw('Delegate'),
-      choice(kw('Sub'), kw('Function')),
-      field('name', $.identifier),
-      optional($.type_parameters),
-      field('parameters', $.parameter_list),
-      optional(seq(kw('As'), field('return_type', $.type))),  // only for Function delegate
+      choice(
+        seq(kw('Sub'), $._callable_signature),
+        seq(kw('Function'), $._callable_signature, optional($._return_type_clause))
+      ),
       $._terminator
     ),
 
@@ -268,8 +270,8 @@ module.exports = grammar({
       commaSep1($.attribute),
       optional($._newline),
       '>',
-      // A trailing `_` line continuation eats the newline, so it may be absent.
-      optional($._terminator)
+      // Continuation may consume the newline; a colon cannot end an attribute list.
+      optional($._newline)
     )),
     // attribute: $ => seq(
     //   optional(seq(field('target', $.identifier), ':')),  // e.g., Assembly: or Module: target
@@ -282,6 +284,25 @@ module.exports = grammar({
       optional($.argument_list)
     ),
 
+    // Explicit file-level targets are statements and may end with a colon.
+    _global_attribute_statement: $ => seq(
+      $._global_attribute_block,
+      $._terminator
+    ),
+    _global_attribute_block: $ => seq(
+      '<',
+      optional($._newline),
+      commaSep1(alias($._global_attribute, $.attribute)),
+      optional($._newline),
+      '>'
+    ),
+    _global_attribute: $ => seq(
+      field('target', alias(choice(kw('Assembly'), kw('Module')), $.identifier)),
+      ':',
+      field('name', choice($.identifier, $.namespace_name)),
+      optional($.argument_list)
+    ),
+
     // Global Assembly/Module targets cannot attach to nested type declarations.
     type_attribute_block: $ => prec.right(seq(
       '<',
@@ -289,11 +310,23 @@ module.exports = grammar({
       commaSep1($.type_attribute),
       optional($._newline),
       '>',
-      optional($._terminator)
+      optional($._newline)
     )),
     type_attribute: $ => seq(
       field('name', choice($.identifier, $.namespace_name)),
       optional($.argument_list)
+    ),
+
+    // Return attributes belong to signatures, never to arbitrary type uses.
+    _return_type_clause: $ => seq(
+      kw('As'),
+      optional(field('return_attributes', $.type_attribute_block)),
+      field('return_type', $.type)
+    ),
+    _attributed_property_as_clause: $ => seq(
+      kw('As'),
+      field('return_attributes', $.type_attribute_block),
+      field('type', $.type)
     ),
 
     // Modifiers (public/private/etc.). Multiple modifiers can appear in sequence.
@@ -443,11 +476,10 @@ module.exports = grammar({
     method_declaration: $ => seq(
       optional(field('attributes', $.attribute_block)),
       field('modifiers', optional($.modifiers)),
-      choice(kw('Sub'), kw('Function')),
-      field('name', $.identifier),
-      optional($.type_parameters),
-      field('parameters', $.parameter_list),
-      optional(seq(kw('As'), field('return_type', $.type))),  // only for Function
+      choice(
+        seq(kw('Sub'), $._callable_signature),
+        seq(kw('Function'), $._callable_signature, optional($._return_type_clause))
+      ),
       optional($.implements_clause),
       optional($.handles_clause),
       choice(
@@ -456,6 +488,11 @@ module.exports = grammar({
         // Without body (e.g., abstract method in MustInherit class, or interface method):
         $._terminator
       )
+    ),
+    _callable_signature: $ => seq(
+      field('name', $.identifier),
+      optional($.type_parameters),
+      field('parameters', $.parameter_list)
     ),
 
     // External references have no body and are valid only in type/module members.
@@ -467,7 +504,7 @@ module.exports = grammar({
       choice(
         seq(kw('Sub'), $._external_signature),
         seq(kw('Function'), $._external_signature,
-          optional(seq(kw('As'), field('return_type', $.type))))
+          optional($._return_type_clause))
       ),
       $._terminator
     ),
@@ -501,7 +538,7 @@ module.exports = grammar({
       kw('Property'),
       field('name', $.identifier),
       optional(field('parameters', $.parameter_list)),  // indexed properties
-      optional($.as_clause),
+      optional(choice($.as_clause, alias($._attributed_property_as_clause, $.as_clause))),
       optional($.implements_clause),
       choice(
         // Auto-property or declaration without body:
