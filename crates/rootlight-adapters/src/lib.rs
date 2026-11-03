@@ -10,6 +10,8 @@ mod awk;
 mod elm;
 mod erlang;
 mod flux;
+mod gitignore;
+mod gitignore_program;
 mod ini;
 mod less;
 mod make;
@@ -45,6 +47,11 @@ pub use awk::AwkParseProvider;
 pub use elm::ElmParseProvider;
 pub use erlang::ErlangParseProvider;
 pub use flux::FluxParseProvider;
+pub use gitignore::GitignoreParseProvider;
+pub use gitignore_program::{
+    GitignoreDecision, GitignoreMatcher, MAX_GITIGNORE_MATCH_PATH_BYTES,
+    MAX_GITIGNORE_MATCH_PATH_COMPONENTS,
+};
 pub use ini::IniParseProvider;
 pub use less::LessParseProvider;
 pub use make::MakeParseProvider;

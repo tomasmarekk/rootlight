@@ -95,7 +95,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.106";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.107";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -2949,6 +2949,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         detectors: &["extension", "configuration"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
+    },
+    LanguageCapability {
+        language: "gitignore",
+        suffixes: &[".gitignore"],
+        aliases: &["git-ignore"],
+        detectors: &["extension"],
+        maximum_tier: "tier_d",
+        analyzers: &["native"],
     },
     LanguageCapability {
         language: "glsl",
@@ -8116,7 +8124,7 @@ max_source_file_bytes = 2097152
 
     #[test]
     fn first_party_parsers_advertise_native_structural_analysis() {
-        for language in ["awk", "elm", "ini", "make", "prolog", "scss"] {
+        for language in ["awk", "elm", "gitignore", "ini", "make", "prolog", "scss"] {
             let capability = language_capabilities()
                 .iter()
                 .find(|capability| capability.language == language)
@@ -8124,6 +8132,44 @@ max_source_file_bytes = 2097152
             assert_eq!(capability.analyzers, ["native"]);
             assert_eq!(capability.maximum_tier, "tier_d");
         }
+    }
+
+    #[test]
+    fn gitignore_suffix_routes_only_the_native_git_dialect() {
+        for path in [
+            ".gitignore",
+            ".GITIGNORE",
+            "Rust.gitignore",
+            "Global/Editor.GITIGNORE",
+        ] {
+            assert_eq!(extension_language(path), Some("gitignore"), "{path}");
+            let relative = RelativePath::parse(Path::new(path)).unwrap();
+            let (class, signals) = classify(&relative, b"*.log\n!keep.log\n");
+            assert_eq!(class, InputClass::Source);
+            assert!(signals.iter().any(|signal| signal.language == "gitignore"
+                && signal.evidence == LanguageEvidence::Extension));
+        }
+        for path in [
+            ".dockerignore",
+            ".npmignore",
+            ".hgignore",
+            ".ignore",
+            ".git/info/exclude",
+            "gitignore",
+            "Rust.gitignore.bak",
+            "folder.gitignore/file.txt",
+        ] {
+            assert_ne!(extension_language(path), Some("gitignore"), "{path}");
+            assert_ne!(filename_language(path), Some("gitignore"), "{path}");
+        }
+        assert_eq!(canonical_language("gitignore"), Some("gitignore"));
+        assert_eq!(canonical_language("git-ignore"), Some("gitignore"));
+        let capability = language_capabilities()
+            .iter()
+            .find(|capability| capability.language == "gitignore")
+            .unwrap();
+        assert_eq!(capability.suffixes, [".gitignore"]);
+        assert_eq!(capability.aliases, ["git-ignore"]);
     }
 
     #[test]

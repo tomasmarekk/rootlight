@@ -25,6 +25,7 @@ pub use aggregate_source_recovery::{
 };
 mod dql_query;
 mod fsharp_binding;
+mod gitignore_program;
 mod groovy_binding;
 mod groovy_call_lookup;
 mod groovy_callable;
@@ -53,6 +54,12 @@ pub use fsharp_binding::{
     FSharpBindingError, FSharpBindingEvidence, MAX_FSHARP_BINDING_COMPONENTS,
     MAX_FSHARP_BINDING_PAYLOAD_BYTES, MAX_FSHARP_PROJECT_MEMBERS, decode_fsharp_binding_envelope,
     new_fsharp_binding_envelope,
+};
+pub use gitignore_program::{
+    GITIGNORE_PROGRAM_NAMESPACE, GITIGNORE_PROGRAM_VERSION, GitignoreAnchoring, GitignorePolarity,
+    GitignoreProgram, GitignoreProgramError, GitignoreRule, MAX_GITIGNORE_PROGRAM_PAYLOAD_BYTES,
+    MAX_GITIGNORE_RULES, MAX_GITIGNORE_SOURCE_BYTES, decode_gitignore_program_envelope,
+    new_gitignore_program_envelope,
 };
 pub use groovy_binding::{
     GROOVY_BINDING_NAMESPACE, GroovyBindingError, GroovyImportedType,

@@ -150,9 +150,10 @@ use rootlight_adapter_treesitter::{
 };
 use rootlight_adapters::{
     AgdaParseProvider, AwkParseProvider, ElmParseProvider, ErlangParseProvider, FluxParseProvider,
-    IniParseProvider, LessParseProvider, MAX_PROJECT_CONTEXT_BYTES, MakeParseProvider,
-    PrologParseProvider, PwctParseProvider, RuntimeTraceImportRequest, SassParseProvider,
-    ScssParseProvider, TclParseProvider, ThinkScriptParseProvider, import_runtime_trace,
+    GitignoreParseProvider, IniParseProvider, LessParseProvider, MAX_PROJECT_CONTEXT_BYTES,
+    MakeParseProvider, PrologParseProvider, PwctParseProvider, RuntimeTraceImportRequest,
+    SassParseProvider, ScssParseProvider, TclParseProvider, ThinkScriptParseProvider,
+    import_runtime_trace,
 };
 pub use rootlight_adapters::{
     PROJECT_MODULE_RESOLUTION_MARKER, PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC,
@@ -1237,7 +1238,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/388";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/389";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/164";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/16";
@@ -6848,6 +6849,20 @@ impl StructuralPreflight for IniParseProvider {
     }
 }
 
+impl StructuralPreflight for GitignoreParseProvider {
+    fn supports_fresh_source_preservation(&self) -> bool {
+        true
+    }
+
+    fn required_syntax_fact_count(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        GitignoreParseProvider::required_syntax_fact_count(self, request, cancellation)
+    }
+}
+
 impl StructuralPreflight for PwctParseProvider {
     fn supports_fresh_source_preservation(&self) -> bool {
         true
@@ -7972,6 +7987,10 @@ impl FirstSliceService {
             IniParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
                 .map_err(|_| FirstSliceError::Adapter)?,
         );
+        let gitignore_parser = Arc::new(
+            GitignoreParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
+                .map_err(|_| FirstSliceError::Adapter)?,
+        );
         let pwct_parser = Arc::new(
             PwctParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
                 .map_err(|_| FirstSliceError::Adapter)?,
@@ -8249,6 +8268,31 @@ impl FirstSliceService {
         if structural_parsers
             .insert("ini".to_owned(), ini_parser as Arc<dyn StructuralPreflight>)
             .is_some()
+        {
+            return Err(FirstSliceError::Adapter);
+        }
+        let gitignore_analyzer = TreeSitterAnalyzer::new(
+            Arc::clone(&gitignore_parser) as Arc<dyn ParseProvider>,
+            ProducerIdentity::new(
+                "rootlight-first-slice-gitignore-native",
+                "1.0",
+                config.hash(),
+            )
+            .map_err(|_| FirstSliceError::Adapter)?,
+            LanguageId::new("gitignore").map_err(|_| FirstSliceError::Adapter)?,
+            "gitignore-native-structural-1",
+            GitignoreParseProvider::binary_digest(),
+        )
+        .map_err(|_| FirstSliceError::Adapter)?;
+        if analyzers
+            .insert("gitignore".to_owned(), gitignore_analyzer)
+            .is_some()
+            || structural_parsers
+                .insert(
+                    "gitignore".to_owned(),
+                    gitignore_parser as Arc<dyn StructuralPreflight>,
+                )
+                .is_some()
         {
             return Err(FirstSliceError::Adapter);
         }
@@ -27559,6 +27603,7 @@ mod tests {
     mod encoded_file_fallback;
     mod flux_source;
     mod gap_retention;
+    mod gitignore_native;
     mod graphql_query_admission;
     mod groovy_static_import;
     mod gyp_native;
@@ -44410,6 +44455,11 @@ mod tests {
             ArtifactDecisionKind::Reuse
         );
         for (changed_key, previous, expected_decision) in [
+            (
+                adapter_key,
+                previous_parser(b"rootlight.first-slice.treesitter-structural/388"),
+                ArtifactDecisionKind::Rebuild,
+            ),
             (
                 adapter_key,
                 previous_parser(b"rootlight.first-slice.treesitter-structural/343"),

@@ -2140,6 +2140,16 @@ fn verify_snapshot_identities(
                     .check()
                     .map_err(IdentityVerificationError::Control)?;
             }
+            rootlight_ir::GITIGNORE_PROGRAM_NAMESPACE => {
+                rootlight_ir::decode_gitignore_program_envelope(envelope).map_err(|_| {
+                    IdentityVerificationError::IdentityMismatch(
+                        IdentityMismatchComponent::ClaimEnvelope,
+                    )
+                })?;
+                context
+                    .check()
+                    .map_err(IdentityVerificationError::Control)?;
+            }
             rootlight_ir::DQL_QUERY_NAMESPACE => {
                 rootlight_ir::decode_dql_query_envelope(envelope).map_err(|_| {
                     IdentityVerificationError::IdentityMismatch(

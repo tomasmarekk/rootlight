@@ -44,6 +44,7 @@ mod fish;
 mod flux;
 mod fortran_calls;
 mod gdscript;
+mod gitignore;
 mod glsl_bindings;
 mod go_call_formals;
 mod go_calls;
@@ -743,6 +744,7 @@ impl TreeSitterAnalyzer {
                     .max(lowered.rust_owner_modeled_peak)
                     .max(lowered.rdf_modeled_peak)
                     .max(lowered.dql_modeled_peak)
+                    .max(lowered.gitignore_modeled_peak)
             }),
             usage,
         );
@@ -976,6 +978,7 @@ fn required_syntax_fact_count_from_output(
             || cmake::required(fact)
             || ntriples::required(fact)
             || dql::required(fact)
+            || gitignore::required(fact)
             || dockerfile::required(fact)
             || java_local_receivers::required(fact)
             || cpp_const_formals::required(fact)
@@ -1380,6 +1383,7 @@ struct LoweringBudget {
     nested_items: usize,
     ntriples: ntriples::Plan,
     dql: dql::Plan,
+    gitignore: gitignore::Plan,
 }
 
 fn preflight_lowering_limits(
@@ -1451,6 +1455,7 @@ fn preflight_lowering_limits(
         )?;
     let ntriples = ntriples::Plan::new(request, parse_output, cancellation)?;
     let dql = dql::Plan::new(request, parse_output, cancellation)?;
+    let gitignore = gitignore::Plan::new(request, parse_output, cancellation)?;
     let mut entity_candidates = 0_usize;
     let mut occurrence_candidates = 0_usize;
     let mut lexical_relation_candidates = 0_usize;
@@ -1464,7 +1469,9 @@ fn preflight_lowering_limits(
     let mut string_bytes = 0_usize;
     ntriples.account_strings(&mut string_bytes, limits)?;
     dql.account_strings(&mut string_bytes, limits)?;
+    gitignore.account_strings(&mut string_bytes, limits)?;
     skipped_candidates = checked_add(skipped_candidates, usize::from(dql.gap.is_some()))?;
+    skipped_candidates = checked_add(skipped_candidates, usize::from(gitignore.gap.is_some()))?;
     skipped_candidates = checked_add(skipped_candidates, ntriples.gaps.len())?;
     for gap in &ntriples.gaps {
         account_string(&mut string_bytes, gap.detail.len(), limits)?;
@@ -2334,7 +2341,7 @@ fn preflight_lowering_limits(
         checked_add(1, entity_candidates)?,
         checked_add(
             checked_add(vba_compilation_candidates, ntriples.statements.len())?,
-            dql.len(),
+            checked_add(dql.len(), gitignore.len())?,
         )?,
     )?;
     require_resource_limit(
@@ -2397,7 +2404,7 @@ fn preflight_lowering_limits(
             checked_add(2, diagnostic_derivations)?,
             checked_add(
                 checked_add(vba_compilation_candidates, ntriples.statements.len())?,
-                dql.len(),
+                checked_add(dql.len(), gitignore.len())?,
             )?,
         )?,
         field_relation_derivations,
@@ -2413,6 +2420,7 @@ fn preflight_lowering_limits(
         nested_items,
         ntriples,
         dql,
+        gitignore,
     })
 }
 
@@ -2512,6 +2520,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut total_string_bytes = budget.string_bytes;
         let mut ntriples = std::mem::take(&mut budget.ntriples);
         let mut dql = std::mem::take(&mut budget.dql);
+        let mut gitignore = std::mem::take(&mut budget.gitignore);
         if self.request.language().as_str() == "markdown" {
             self.classic_fences = classic_fence_spans(self.coordinates.facts(), cancellation)?;
         }
@@ -4664,6 +4673,18 @@ impl<'context, 'source> Lowering<'context, 'source> {
             )?;
             if extensions.insert(envelope.id, envelope).is_some() {
                 return Err(provider_failure("dql-query-identity-collision"));
+            }
+        }
+
+        if let Some(envelope) = gitignore.envelope(provenance_id)? {
+            ensure_extension_budget(
+                &envelope,
+                extensions.len(),
+                &mut extension_bytes,
+                self.request.limits().ir(),
+            )?;
+            if extensions.insert(envelope.id, envelope).is_some() {
+                return Err(provider_failure("gitignore-program-identity-collision"));
             }
         }
 
@@ -7966,6 +7987,17 @@ impl<'context, 'source> Lowering<'context, 'source> {
             )?;
             insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
         }
+        if let Some(gap) = &gitignore.gap {
+            let region = skipped_region(
+                self.full_source,
+                gap.span,
+                FactDomain::Extensions,
+                SkippedRegionReason::UnsupportedConstruct,
+                gap.detail,
+                provenance_id,
+            )?;
+            insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
+        }
         for gap in &ntriples.gaps {
             cancellation.check()?;
             let region = skipped_region(
@@ -8070,6 +8102,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             rust_owner_modeled_peak,
             rdf_modeled_peak: ntriples.modeled_peak,
             dql_modeled_peak: dql.modeled_peak,
+            gitignore_modeled_peak: gitignore.modeled_peak,
             records,
             coverage_status,
             skipped_regions: stats.skipped_regions,
@@ -10603,6 +10636,7 @@ struct LoweredOutput {
     rust_owner_modeled_peak: usize,
     rdf_modeled_peak: usize,
     dql_modeled_peak: usize,
+    gitignore_modeled_peak: usize,
     records: Vec<IrRecord>,
     coverage_status: CoverageStatus,
     skipped_regions: usize,

@@ -32,6 +32,9 @@ use crate::{
     FSHARP_BINDING_NAMESPACE, decode_fsharp_binding_envelope, new_fsharp_binding_envelope,
 };
 use crate::{
+    GITIGNORE_PROGRAM_NAMESPACE, decode_gitignore_program_envelope, new_gitignore_program_envelope,
+};
+use crate::{
     GROOVY_BINDING_NAMESPACE, decode_groovy_binding_envelope, new_groovy_binding_envelope,
 };
 use crate::{
@@ -1094,6 +1097,7 @@ fn require_supported_extensions_with_checkpoint(
                 | RUST_DIRECT_CALL_NAMESPACE
                 | RDF_STATEMENT_NAMESPACE
                 | DQL_QUERY_NAMESPACE
+                | GITIGNORE_PROGRAM_NAMESPACE
                 | GROOVY_TYPE_LOOKUP_NAMESPACE
                 | GROOVY_CALLABLE_NAMESPACE
                 | GROOVY_MEMBER_NAMESPACE
@@ -1797,6 +1801,13 @@ fn rebind_extension(
                 .and_then(|query| query.rebind(generation))
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
             new_dql_query_envelope(provenance, &query)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)
+        }
+        GITIGNORE_PROGRAM_NAMESPACE => {
+            let program = decode_gitignore_program_envelope(&extension)
+                .and_then(|program| program.rebind(generation))
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            new_gitignore_program_envelope(provenance, &program)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)
         }
         RDF_STATEMENT_NAMESPACE => {
@@ -2985,6 +2996,72 @@ mod tests {
         );
         assert_eq!(writer.encoded.len(), RECORD_HASH_BUFFER_BYTES);
         assert_eq!(writer.failure, Some(NormalizedRebindError::Interrupted));
+    }
+
+    #[test]
+    fn gitignore_program_rebind_dispatch_preserves_order_and_source_ownership() {
+        let text = "cache/\n!cache/keep\ncache/\n";
+        let repository = rootlight_ids::RepositoryId::from_bytes([61; 16]);
+        let generation = GenerationId::from_bytes([62; 20]);
+        let file = FileId::from_bytes([63; 20]);
+        let owner = crate::SourceSpan::new(file, 0, text.len().try_into().unwrap()).unwrap();
+        let source = SourceRef::new(
+            repository,
+            generation,
+            owner,
+            rootlight_ids::content_hash(text.as_bytes()),
+            None,
+        );
+        let lines = [(0, 6), (7, 18), (19, 25)]
+            .map(|(start, end)| crate::SourceSpan::new(file, start, end).unwrap())
+            .to_vec();
+        let program = crate::GitignoreProgram::from_evidence(source, text, lines).unwrap();
+        let provenance = FactId::from_bytes([64; 20]);
+        let envelope = new_gitignore_program_envelope(provenance, &program).unwrap();
+        let mut document = NormalizedIrDocument::empty(repository, generation);
+        document.extensions.push(envelope.clone());
+        require_supported_extensions_with_checkpoint(&document, &mut || true).unwrap();
+        let next_provenance = FactId::from_bytes([65; 20]);
+        let ids = FactIdMap {
+            entries: vec![(provenance, Some(next_provenance))],
+        };
+        let next_generation = GenerationId::from_bytes([66; 20]);
+        let rebound = rebind_extension(
+            envelope.clone(),
+            repository,
+            next_generation,
+            &ids,
+            &mut || true,
+        )
+        .unwrap();
+        let decoded = decode_gitignore_program_envelope(&rebound).unwrap();
+        assert_eq!(decoded.rules(), program.rules());
+        assert_eq!(decoded.text(), text);
+        assert_eq!(decoded.source().generation(), next_generation);
+        assert_eq!(rebound.provenance, next_provenance);
+        assert_ne!(rebound.id, envelope.id);
+        let neutral = rebind_extension(
+            envelope,
+            repository,
+            GENERATION_NEUTRAL_ID,
+            &ids,
+            &mut || true,
+        )
+        .unwrap();
+        let same_ids = FactIdMap {
+            entries: vec![(next_provenance, Some(next_provenance))],
+        };
+        assert_eq!(
+            neutral,
+            rebind_extension(
+                rebound,
+                repository,
+                GENERATION_NEUTRAL_ID,
+                &same_ids,
+                &mut || true
+            )
+            .unwrap()
+        );
     }
 
     #[test]
