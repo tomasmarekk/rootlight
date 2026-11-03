@@ -43,6 +43,9 @@ mod binding_proofs;
 #[path = "index_coverage_example/gap_census.rs"]
 mod gap_census;
 
+#[path = "index_coverage_example/gitignore_programs.rs"]
+mod gitignore_programs;
+
 #[cfg(test)]
 #[path = "container_sources/fixture.rs"]
 mod fixture;
@@ -628,6 +631,7 @@ impl DiagnosticSession {
                                 &snapshot.document().diagnostics
                             ),
                             "source_accounting":accounting,
+                            "gitignore_programs":gitignore_programs::inspect(snapshot.document())?,
                             "aggregate_source_recovery":inspect_aggregate_source_recovery(
                                 snapshot.document(), snapshot.metadata(), snapshot.file_count()
                             )?,
@@ -3660,6 +3664,47 @@ mod tests {
         let mut count = usize::MAX;
         assert!(add_count(&mut count, 1).is_err());
         assert_eq!(count, usize::MAX);
+    }
+
+    #[test]
+    fn source_accounting_decodes_every_native_gitignore_program() {
+        let directory = tempdir();
+        let repository = directory.path().join("repository");
+        let state = directory.path().join("state");
+        fs::create_dir(&repository).unwrap();
+        fs::write(
+            repository.join("Rules.gitignore"),
+            "\u{feff}#note\r\ncache/\r\n!cache/keep\r\ncache/\r\n",
+        )
+        .unwrap();
+        fs::write(repository.join("Empty.gitignore"), "#note\r\n").unwrap();
+        fs::write(repository.join("Broken.gitignore"), "[z-a]\n").unwrap();
+        for mode in [StateMode::Fresh, StateMode::Resume] {
+            let report = inspect_source_accounting(&repository, &state, None, mode).unwrap();
+            assert_source_accounting_scope(&report);
+            let observed = &report["gitignore_programs"];
+            assert_eq!(observed["retained_gitignore_files"], 3);
+            assert_eq!(observed["verified_programs"], 2);
+            assert_eq!(observed["verified_rules"], 3);
+            assert_eq!(observed["all_retained_files_have_programs"], false);
+            assert_eq!(
+                observed["missing_or_refused"][0]["path"],
+                "Broken.gitignore"
+            );
+            let programs = observed["programs"].as_array().unwrap();
+            assert_eq!(programs[0]["path"], "Empty.gitignore");
+            assert_eq!(programs[0]["rule_count"], 0);
+            assert_eq!(programs[1]["path"], "Rules.gitignore");
+            assert_eq!(programs[1]["rules"][0]["line_number"], 2);
+            for program in programs {
+                assert_eq!(program["canonical_verified"], true);
+                assert_eq!(program["source_identity_verified"], true);
+                assert_eq!(program["matcher_recompiled"], true);
+                assert_eq!(program["repository_context_gaps"], 1);
+                assert_eq!(program["repository_context_qualified"], false);
+            }
+            assert_eq!(observed["whole_language_qualified"], false);
+        }
     }
 
     fn assert_source_accounting_scope(report: &serde_json::Value) {
