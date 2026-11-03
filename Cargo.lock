@@ -2245,6 +2245,7 @@ version = "0.1.0"
 dependencies = [
  "proptest",
  "rootlight-cancel",
+ "rootlight-catalog",
  "rootlight-crypto",
  "rootlight-ids",
  "rootlight-ir",

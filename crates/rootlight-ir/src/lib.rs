@@ -145,8 +145,9 @@ pub use rdf_statement::{
 };
 pub use rebind::{
     CanonicalGenerationNeutralDigests, CanonicalNormalizedFileChunk, CanonicalNormalizedIrDocument,
-    GenerationNeutralFactIdIndex, NormalizedRebindError, canonical_generation_neutral_digests,
-    generation_neutral_workspace_bytes,
+    GenerationNeutralFactIdIndex, NormalizedRebindError, RdfDigestSource,
+    canonical_generation_neutral_digests, canonical_generation_neutral_digests_with_rdf,
+    generation_neutral_workspace_bytes, rdf_digest_workspace_bytes,
 };
 pub use rust_direct_call::{
     RUST_DIRECT_CALL_NAMESPACE, RustDirectCall, RustDirectCallError,

@@ -458,6 +458,7 @@ pub struct RdfPartitionReader {
     limits: IrLimits,
     census: RdfPartitionCensus,
     new_base_sources: u64,
+    neutral_ids: Vec<(FactId, FactId)>,
 }
 
 impl fmt::Debug for RdfPartitionReader {
@@ -508,6 +509,7 @@ impl RdfPartitionReader {
         expected: &RdfPartitionDescriptor,
         base: &IdentityVerifiedRdfBase,
         connection: &Connection,
+        neutral: &rootlight_ir::GenerationNeutralFactIdIndex,
         context: &GenerationContext<'_>,
     ) -> Result<Self, CatalogError> {
         if base.metadata() != expected.metadata() || !base.partitions().contains(expected) {
@@ -518,7 +520,7 @@ impl RdfPartitionReader {
             expected,
             &IrLimits::default(),
             context,
-            Some((base, connection)),
+            Some((base, connection, neutral)),
         )
     }
 
@@ -527,7 +529,11 @@ impl RdfPartitionReader {
         expected: &RdfPartitionDescriptor,
         limits: &IrLimits,
         context: &GenerationContext<'_>,
-        base: Option<(&IdentityVerifiedRdfBase, &Connection)>,
+        base: Option<(
+            &IdentityVerifiedRdfBase,
+            &Connection,
+            &rootlight_ir::GenerationNeutralFactIdIndex,
+        )>,
     ) -> Result<Self, CatalogError> {
         context.check().map_err(CatalogError::control)?;
         if expected.requires_parent_authentication() && base.is_none() {
@@ -588,6 +594,12 @@ impl RdfPartitionReader {
         let mut sources = BTreeSet::new();
         let mut source_json_bytes = 0u64;
         let mut payload_utf8_bytes = 0u64;
+        let mut neutral_ids = Vec::new();
+        if base.is_some() {
+            neutral_ids
+                .try_reserve_exact(usize::try_from(expected.record_count()).map_err(|_| corrupt())?)
+                .map_err(|_| CatalogError::new(CatalogErrorKind::Storage))?;
+        }
         while let Some(row) = rows.next().map_err(CatalogError::sqlite)? {
             context.check().map_err(CatalogError::control)?;
             let record = decode_record(
@@ -598,7 +610,7 @@ impl RdfPartitionReader {
                 expected.source_bytes(),
                 limits,
             )?;
-            if let Some((base, _)) = base
+            if let Some((base, _, _)) = base
                 && (base
                     .base_document()
                     .provenance
@@ -637,6 +649,16 @@ impl RdfPartitionReader {
                 )
                 .map_err(|_| corrupt())?;
             digest.write_record(&record)?;
+            if let Some((_, _, neutral)) = base {
+                let id = neutral
+                    .rdf_statement_id(&record, || context.check().is_ok())
+                    .map_err(|_| {
+                        context
+                            .check()
+                            .map_or_else(CatalogError::control, |()| corrupt())
+                    })?;
+                neutral_ids.push((record.id, id));
+            }
         }
         digest.write_bytes(b"]")?;
         let text_bytes = usage
@@ -666,7 +688,7 @@ impl RdfPartitionReader {
         let mut new_base_sources = 0u64;
         for source in &sources {
             context.check().map_err(CatalogError::control)?;
-            let present = if let Some((_, connection)) = base {
+            let present = if let Some((_, connection, _)) = base {
                 base_contains_source(connection, source)?
             } else {
                 false
@@ -681,7 +703,20 @@ impl RdfPartitionReader {
             limits: limits.clone(),
             census,
             new_base_sources,
+            neutral_ids,
         })
+    }
+
+    pub(super) fn neutral_ids(&self) -> &[(FactId, FactId)] {
+        &self.neutral_ids
+    }
+
+    pub(super) fn neutral_id_bytes(&self) -> Result<u64, CatalogError> {
+        self.neutral_ids
+            .capacity()
+            .checked_mul(std::mem::size_of::<(FactId, FactId)>())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or_else(corrupt)
     }
 
     pub(super) const fn new_base_sources(&self) -> u64 {

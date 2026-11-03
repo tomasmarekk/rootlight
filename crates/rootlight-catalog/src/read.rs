@@ -420,23 +420,29 @@ pub(crate) fn read_rdf_base(
     stats: GenerationStats,
     context: &GenerationContext<'_>,
 ) -> Result<rootlight_storage::IdentityVerifiedRdfBase, CatalogError> {
-    if !crate::schema::is_rdf_base(connection)? {
-        return Err(CatalogError::new(CatalogErrorKind::Corrupt));
-    }
-    let snapshot = match read_generation_with_policy(
-        connection,
-        metadata,
-        stats,
-        context,
-        |_| Ok::<(), std::convert::Infallible>(()),
-        true,
-    ) {
-        Ok(snapshot) => snapshot,
-        Err(OracleReadAdmissionError::Catalog(error)) => return Err(error),
+    match read_rdf_base_with_admission(connection, metadata, stats, context, |_| {
+        Ok::<(), std::convert::Infallible>(())
+    }) {
+        Ok(base) => Ok(base),
+        Err(OracleReadAdmissionError::Catalog(error)) => Err(error),
         Err(OracleReadAdmissionError::Admission(never)) => match never {},
-    };
+    }
+}
+
+pub(crate) fn read_rdf_base_with_admission<E>(
+    connection: &Connection,
+    metadata: GenerationMetadata,
+    stats: GenerationStats,
+    context: &GenerationContext<'_>,
+    admit: impl FnOnce(OracleReadMemoryPlan) -> Result<(), E>,
+) -> Result<rootlight_storage::IdentityVerifiedRdfBase, OracleReadAdmissionError<E>> {
+    if !crate::schema::is_rdf_base(connection)? {
+        return Err(CatalogError::new(CatalogErrorKind::Corrupt).into());
+    }
+    let snapshot = read_generation_with_policy(connection, metadata, stats, context, admit, true)?;
     rootlight_storage::IdentityVerifiedRdfBase::verify_snapshot(snapshot, context)
         .map_err(crate::identity_catalog_error)
+        .map_err(OracleReadAdmissionError::Catalog)
 }
 
 fn read_generation_with_policy<E>(
@@ -447,26 +453,35 @@ fn read_generation_with_policy<E>(
     admit: impl FnOnce(OracleReadMemoryPlan) -> Result<(), E>,
     allow_rdf_base: bool,
 ) -> Result<GenerationSnapshot, OracleReadAdmissionError<E>> {
-    let mut transaction = connection
-        .unchecked_transaction()
-        .map_err(CatalogError::sqlite)?;
-    let (metadata, stats, ir_version) = read_header(&transaction, context)?;
+    // Logical rereads reuse the original authenticated view. Starting another
+    // transaction would either fail or lose the view that pins the complete set.
+    let owned_transaction = if allow_rdf_base && !connection.is_autocommit() {
+        None
+    } else {
+        Some(
+            connection
+                .unchecked_transaction()
+                .map_err(CatalogError::sqlite)?,
+        )
+    };
+    let transaction: &Connection = owned_transaction.as_deref().unwrap_or(connection);
+    let (metadata, stats, ir_version) = read_header(transaction, context)?;
     if metadata != expected_metadata || stats != expected_stats {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt).into());
     }
     if !allow_rdf_base
-        && (crate::schema::is_rdf_base(&transaction)?
-            || has_rdf_partition_set(&transaction, context)?)
+        && (crate::schema::is_rdf_base(transaction)?
+            || has_rdf_partition_set(transaction, context)?)
     {
         return Err(CatalogError::new(CatalogErrorKind::PartitionedMaterializationRequired).into());
     }
     let cardinality =
-        validate_payload_cardinality(&transaction, metadata.contract_version(), stats, context)?;
+        validate_payload_cardinality(transaction, metadata.contract_version(), stats, context)?;
     let entity_flag_rows = cardinality.entity_flag_rows;
-    let maximum_payload_bytes = maximum_payload_bytes(&transaction, stats, context)?;
+    let maximum_payload_bytes = maximum_payload_bytes(transaction, stats, context)?;
     let symbol_envelopes =
-        symbol_envelope_census(&transaction, metadata, stats.extensions(), context)?;
-    let skipped_metadata_bytes = skipped_metadata_bytes(&transaction, stats, context)?;
+        symbol_envelope_census(transaction, metadata, stats.extensions(), context)?;
+    let skipped_metadata_bytes = skipped_metadata_bytes(transaction, stats, context)?;
     let memory_plan = oracle_read_memory_plan(
         metadata.contract_version(),
         stats,
@@ -479,55 +494,49 @@ fn read_generation_with_policy<E>(
             .checked_add(symbol_envelopes.metadata_bytes)
             .ok_or_else(memory_plan_overflow)?,
     )?;
-    validate_identity_registry_layout(&transaction, memory_plan.identity_registry_rows(), context)?;
-    validate_source_reference_layout(&transaction, stats.source_refs(), context)?;
+    validate_identity_registry_layout(transaction, memory_plan.identity_registry_rows(), context)?;
+    validate_source_reference_layout(transaction, stats.source_refs(), context)?;
     admit(memory_plan).map_err(OracleReadAdmissionError::Admission)?;
     context.check().map_err(CatalogError::control)?;
-    let sources = read_sources(&transaction, stats.source_refs(), context)?;
+    let sources = read_sources(transaction, stats.source_refs(), context)?;
     let evidence_owners = evidence_owner_count(stats)?;
     let mut evidence = read_evidence(
-        &transaction,
+        transaction,
         cardinality.evidence_rows,
         evidence_owners,
         context,
     )?;
-    let mut flags = read_flags(&transaction, entity_flag_rows, stats.entities(), context)?;
+    let mut flags = read_flags(transaction, entity_flag_rows, stats.entities(), context)?;
     let mut candidates = read_candidates(
-        &transaction,
+        transaction,
         cardinality.occurrence_candidate_rows,
         stats.occurrences(),
         context,
     )?;
     let mut provenance_sources = read_provenance_sources(
-        &transaction,
+        transaction,
         &sources,
         cardinality.provenance_source_rows,
         stats.provenance(),
         context,
     )?;
     let mut provenance_derivations = read_provenance_derivations(
-        &transaction,
+        transaction,
         cardinality.provenance_derivation_rows,
         stats.provenance(),
         context,
     )?;
 
     let provenance = read_provenance(
-        &transaction,
+        transaction,
         stats.provenance(),
         &mut provenance_sources,
         &mut provenance_derivations,
         context,
     )?;
-    let files = read_files(
-        &transaction,
-        stats.files(),
-        &sources,
-        &mut evidence,
-        context,
-    )?;
+    let files = read_files(transaction, stats.files(), &sources, &mut evidence, context)?;
     let entities = read_entities(
-        &transaction,
+        transaction,
         stats.entities(),
         &sources,
         &mut evidence,
@@ -535,7 +544,7 @@ fn read_generation_with_policy<E>(
         context,
     )?;
     let occurrences = read_occurrences(
-        &transaction,
+        transaction,
         stats.occurrences(),
         &sources,
         &mut evidence,
@@ -543,21 +552,21 @@ fn read_generation_with_policy<E>(
         context,
     )?;
     let relations = read_relations(
-        &transaction,
+        transaction,
         stats.relations(),
         &sources,
         &mut evidence,
         context,
     )?;
     let coverage_records = read_coverage(
-        &transaction,
+        transaction,
         stats.coverage(),
         &sources,
         &mut evidence,
         context,
     )?;
     let document = read_complete_document(
-        &transaction,
+        transaction,
         metadata,
         ir_version,
         stats,
@@ -610,7 +619,7 @@ fn read_generation_with_policy<E>(
         }
     }
 
-    validate_document_hash(&transaction, &document, context)?;
+    validate_document_hash(transaction, &document, context)?;
     let support = if allow_rdf_base {
         rootlight_storage::rdf_partition_extension_support()
     } else {
@@ -657,14 +666,16 @@ fn read_generation_with_policy<E>(
     if comparable_stats != plan.stats || !stored_rows_match {
         return Err(CatalogError::new(CatalogErrorKind::Corrupt).into());
     }
-    validate_identity_registry(&transaction, &plan.identities, context)?;
+    validate_identity_registry(transaction, &plan.identities, context)?;
     validate_source_registry(&sources, &plan.source_ordinals, context)?;
-    if allow_rdf_base {
-        // The logical reader retains this authenticated base snapshot alongside
-        // its already pinned leaves; callers release it by closing the connection.
-        transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore);
-    } else {
-        transaction.commit().map_err(CatalogError::sqlite)?;
+    if let Some(mut transaction) = owned_transaction {
+        if allow_rdf_base {
+            // The logical reader retains this authenticated base snapshot alongside
+            // its already pinned leaves; callers release it by closing the connection.
+            transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore);
+        } else {
+            transaction.commit().map_err(CatalogError::sqlite)?;
+        }
     }
     Ok(snapshot)
 }

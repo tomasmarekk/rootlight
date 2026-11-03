@@ -77,7 +77,7 @@ pub use source_metadata_quote::{
 pub use source_text::{
     QuerySourceTextChunk, SourceTextPrefixReadQueryResult, SourceTextReadQueryResult,
 };
-pub use store::{GenerationLease, GenerationSet};
+pub use store::{GenerationLease, GenerationSet, RdfGenerationLease};
 
 /// Exact source reads that do not require lexical or semantic graph residency.
 pub use service::read_source_authority;

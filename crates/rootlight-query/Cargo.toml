@@ -8,6 +8,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+rootlight-catalog = { path = "../rootlight-catalog" }
 rootlight-cancel = { path = "../rootlight-cancel" }
 rootlight-ids = { path = "../rootlight-ids" }
 rootlight-ir = { path = "../rootlight-ir" }

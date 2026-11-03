@@ -3,9 +3,13 @@ use std::{
     sync::Arc,
 };
 
+use rootlight_catalog::OracleReader;
 use rootlight_ids::{FileId, GenerationId};
 use rootlight_search::{LexicalSearch, SourceLexicalCoverage, SymbolNameLexicalOmissions};
-use rootlight_storage::{GenerationMetadata, GenerationSnapshot, IdentityVerifiedGeneration};
+use rootlight_storage::{
+    GenerationMetadata, GenerationReader as _, GenerationSnapshot, GenerationStatsLayout,
+    IdentityVerifiedGeneration,
+};
 
 use crate::{QueryError, QueryService};
 
@@ -31,6 +35,28 @@ pub struct GenerationSet<Search> {
 /// before executing a bounded query.
 pub struct GenerationLease<Search> {
     retained: Arc<LoadedGeneration<Search>>,
+}
+
+/// Query-scoped ownership of one complete authenticated RDF storage set.
+///
+/// The reader retains the verified base and every committed leaf view. It cannot
+/// be converted into the canonical snapshot lease used by owned graph queries.
+pub struct RdfGenerationLease<Search> {
+    retained: Arc<LoadedRdfGeneration<Search>>,
+}
+
+impl<Search> RdfGenerationLease<Search> {
+    /// Returns the complete logical reader pinned by this lease.
+    #[must_use]
+    pub fn reader(&self) -> &OracleReader {
+        &self.retained.reader
+    }
+
+    /// Returns the generation-pinned lexical reader retained with the graph.
+    #[must_use]
+    pub fn search(&self) -> &Search {
+        &self.retained.search
+    }
 }
 
 impl<Search> GenerationLease<Search>
@@ -157,6 +183,92 @@ where
         Ok(id)
     }
 
+    /// Retains a complete authenticated RDF reader without canonical snapshot authority.
+    ///
+    /// # Errors
+    /// Rejects a canonical reader, search identity mismatch, duplicate generation,
+    /// or exhausted combined retention capacity.
+    pub fn stage_rdf(
+        &mut self,
+        reader: OracleReader,
+        search: Search,
+    ) -> Result<GenerationId, QueryError> {
+        let id = reader.metadata().generation();
+        if reader.stats().layout() != GenerationStatsLayout::CanonicalOracleWithRdfV1
+            || search.generation() != id
+        {
+            return Err(QueryError::GenerationMismatch);
+        }
+        if self.generations.contains_key(&id) || self.staged.contains_key(&id) {
+            return Err(QueryError::DuplicateGeneration);
+        }
+        if self.generations.len() + self.staged.len() >= self.maximum {
+            return Err(QueryError::RetentionLimit);
+        }
+        self.staged.insert(
+            id,
+            RetainedGeneration::LogicalRdf(Arc::new(LoadedRdfGeneration { reader, search })),
+        );
+        Ok(id)
+    }
+
+    /// Reloads one complete logical RDF reader into its exact retained identity.
+    ///
+    /// # Errors
+    /// Rejects absent/already loaded identities, a non-RDF reader, or metadata and
+    /// lexical-generation drift. A pinned loaded owner is never replaced.
+    pub fn reload_rdf(
+        &mut self,
+        reader: OracleReader,
+        search: Search,
+    ) -> Result<GenerationId, QueryError> {
+        let metadata = reader.metadata();
+        let id = metadata.generation();
+        if reader.stats().layout() != GenerationStatsLayout::CanonicalOracleWithRdfV1
+            || search.generation() != id
+        {
+            return Err(QueryError::GenerationMismatch);
+        }
+        let retained = self
+            .generations
+            .get_mut(&id)
+            .ok_or(QueryError::GenerationNotFound)?;
+        match retained {
+            RetainedGeneration::Unloaded(expected) if *expected == metadata => {
+                *retained = RetainedGeneration::LogicalRdf(Arc::new(LoadedRdfGeneration {
+                    reader,
+                    search,
+                }));
+                Ok(id)
+            }
+            RetainedGeneration::Unloaded(_) => Err(QueryError::GenerationMismatch),
+            RetainedGeneration::Loaded(_) | RetainedGeneration::LogicalRdf(_) => {
+                Err(QueryError::DuplicateGeneration)
+            }
+        }
+    }
+
+    /// Pins a complete logical RDF set independently of the retention lock.
+    ///
+    /// # Errors
+    /// Rejects an absent/unloaded identity or a canonical snapshot backing.
+    pub fn rdf_lease(
+        &self,
+        generation: GenerationId,
+    ) -> Result<RdfGenerationLease<Search>, QueryError> {
+        match self
+            .generations
+            .get(&generation)
+            .ok_or(QueryError::GenerationNotFound)?
+        {
+            RetainedGeneration::LogicalRdf(retained) => Ok(RdfGenerationLease {
+                retained: Arc::clone(retained),
+            }),
+            RetainedGeneration::Loaded(_) => Err(QueryError::GenerationMismatch),
+            RetainedGeneration::Unloaded(_) => Err(QueryError::GenerationNotFound),
+        }
+    }
+
     /// Commits one staged generation and optionally selects it as active.
     ///
     /// # Errors
@@ -235,8 +347,12 @@ where
             .generations
             .get(&generation)
             .ok_or(QueryError::GenerationNotFound)?;
-        let RetainedGeneration::Loaded(retained) = retained else {
-            return Err(QueryError::GenerationNotFound);
+        let retained = match retained {
+            RetainedGeneration::Loaded(retained) => retained,
+            RetainedGeneration::LogicalRdf(_) => {
+                return Err(QueryError::LogicalGenerationRequiresReader);
+            }
+            RetainedGeneration::Unloaded(_) => return Err(QueryError::GenerationNotFound),
         };
         QueryService::new(&retained.snapshot, &retained.search)
     }
@@ -256,8 +372,12 @@ where
             .generations
             .get(&generation)
             .ok_or(QueryError::GenerationNotFound)?;
-        let RetainedGeneration::Loaded(retained) = retained else {
-            return Err(QueryError::GenerationNotFound);
+        let retained = match retained {
+            RetainedGeneration::Loaded(retained) => retained,
+            RetainedGeneration::LogicalRdf(_) => {
+                return Err(QueryError::LogicalGenerationRequiresReader);
+            }
+            RetainedGeneration::Unloaded(_) => return Err(QueryError::GenerationNotFound),
         };
         Ok(GenerationLease {
             retained: Arc::clone(retained),
@@ -354,11 +474,15 @@ where
     /// Returns [`QueryError::GenerationNotFound`] when the identity is not
     /// retained.
     pub fn generation(&self, generation: GenerationId) -> Result<&GenerationSnapshot, QueryError> {
-        self.generations
+        match self
+            .generations
             .get(&generation)
-            .and_then(RetainedGeneration::loaded_entry)
-            .map(|retained| &retained.snapshot)
-            .ok_or(QueryError::GenerationNotFound)
+            .ok_or(QueryError::GenerationNotFound)?
+        {
+            RetainedGeneration::Loaded(retained) => Ok(&retained.snapshot),
+            RetainedGeneration::LogicalRdf(_) => Err(QueryError::LogicalGenerationRequiresReader),
+            RetainedGeneration::Unloaded(_) => Err(QueryError::GenerationNotFound),
+        }
     }
 
     /// Returns retained generation metadata without loading its payload.
@@ -396,13 +520,21 @@ where
             .generations
             .get_mut(&generation)
             .ok_or(QueryError::GenerationNotFound)?;
-        let RetainedGeneration::Loaded(loaded) = retained else {
-            return Ok(true);
+        let metadata = match retained {
+            RetainedGeneration::Loaded(loaded) => {
+                if Arc::strong_count(loaded) != 1 {
+                    return Ok(false);
+                }
+                loaded.snapshot.metadata()
+            }
+            RetainedGeneration::LogicalRdf(loaded) => {
+                if Arc::strong_count(loaded) != 1 {
+                    return Ok(false);
+                }
+                loaded.reader.metadata()
+            }
+            RetainedGeneration::Unloaded(_) => return Ok(true),
         };
-        if Arc::strong_count(loaded) != 1 {
-            return Ok(false);
-        }
-        let metadata = loaded.snapshot.metadata();
         *retained = RetainedGeneration::Unloaded(metadata);
         Ok(true)
     }
@@ -432,7 +564,9 @@ where
             .get_mut(&id)
             .ok_or(QueryError::GenerationNotFound)?;
         match retained {
-            RetainedGeneration::Loaded(_) => Err(QueryError::DuplicateGeneration),
+            RetainedGeneration::Loaded(_) | RetainedGeneration::LogicalRdf(_) => {
+                Err(QueryError::DuplicateGeneration)
+            }
             RetainedGeneration::Unloaded(metadata) => {
                 if *metadata != snapshot.metadata() {
                     return Err(QueryError::GenerationMismatch);
@@ -473,6 +607,7 @@ where
 
 enum RetainedGeneration<Search> {
     Loaded(Arc<LoadedGeneration<Search>>),
+    LogicalRdf(Arc<LoadedRdfGeneration<Search>>),
     Unloaded(GenerationMetadata),
 }
 
@@ -484,23 +619,22 @@ impl<Search> RetainedGeneration<Search> {
     fn metadata(&self) -> GenerationMetadata {
         match self {
             Self::Loaded(retained) => retained.snapshot.metadata(),
+            Self::LogicalRdf(retained) => retained.reader.metadata(),
             Self::Unloaded(metadata) => *metadata,
         }
     }
 
-    fn loaded_entry(&self) -> Option<&LoadedGeneration<Search>> {
-        match self {
-            Self::Loaded(retained) => Some(retained),
-            Self::Unloaded(_) => None,
-        }
-    }
-
     const fn is_loaded(&self) -> bool {
-        matches!(self, Self::Loaded(_))
+        matches!(self, Self::Loaded(_) | Self::LogicalRdf(_))
     }
 }
 
 struct LoadedGeneration<Search> {
     snapshot: GenerationSnapshot,
+    search: Search,
+}
+
+struct LoadedRdfGeneration<Search> {
+    reader: OracleReader,
     search: Search,
 }

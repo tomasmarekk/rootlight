@@ -144,9 +144,11 @@ allow_build_script = false
 
 [[crates]]
 name = "rootlight-adapter-treesitter"
+# XML declaration admission uses the shared leaf codec.
 allowed_internal_dependencies = [
   "rootlight-adapter-sdk",
   "rootlight-cancel",
+  "rootlight-encoding",
   "rootlight-ids",
   "rootlight-ir",
   "rootlight-thinkscript",
@@ -288,9 +290,11 @@ allow_build_script = false
 
 [[crates]]
 name = "rootlight-discovery"
+# XML declaration admission uses the shared leaf codec.
 allowed_internal_dependencies = [
   "rootlight-cancel",
   "rootlight-config",
+  "rootlight-encoding",
   "rootlight-ids",
   "rootlight-incremental",
   "rootlight-thinkscript",
@@ -366,7 +370,9 @@ allow_build_script = false
 
 [[crates]]
 name = "rootlight-query"
+# Logical RDF leases retain the actual authenticated catalog reader.
 allowed_internal_dependencies = [
+  "rootlight-catalog",
   "rootlight-cancel",
   "rootlight-ids",
   "rootlight-ir",

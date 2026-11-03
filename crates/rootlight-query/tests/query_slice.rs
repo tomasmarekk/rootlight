@@ -2061,6 +2061,8 @@ fn lossless_text_separates_utf16_physical_and_presentation_costs() {
     }
 }
 
+#[path = "support/rdf_retention.rs"]
+mod rdf_retention;
 #[path = "support/source_metadata_quote.rs"]
 mod source_metadata_quote;
 #[path = "support/source_stream_duration.rs"]

@@ -79,6 +79,11 @@ pub struct CanonicalNormalizedFileChunk {
     encoded_bytes: usize,
 }
 
+mod rdf_digest;
+pub use rdf_digest::{
+    RdfDigestSource, canonical_generation_neutral_digests_with_rdf, rdf_digest_workspace_bytes,
+};
+
 /// A complete canonical IR document with generation-owned identity neutralized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CanonicalGenerationNeutralDocument {
@@ -183,6 +188,36 @@ impl GenerationNeutralFactIdIndex {
     #[must_use]
     pub fn get(&self, original: FactId) -> Option<FactId> {
         self.ids.get(original)
+    }
+
+    /// Reconstructs one RDF v1 neutral identity using this complete base ID map.
+    ///
+    /// The returned scalar is digest data, not a graph or publication capability.
+    ///
+    /// # Errors
+    /// Rejects unsupported or oversized RDF, unknown global provenance, invalid
+    /// identity recipes and caller interruption.
+    pub fn rdf_statement_id(
+        &self,
+        record: &ExtensionEnvelope,
+        mut checkpoint: impl FnMut() -> bool,
+    ) -> Result<FactId, NormalizedRebindError> {
+        ensure_projection_continues(&mut checkpoint)?;
+        if record.namespace != RDF_STATEMENT_NAMESPACE || record.version != "1" {
+            return Err(NormalizedRebindError::UnsupportedExtension);
+        }
+        crate::IrDocumentUsage::measure_extension(record, &IrLimits::default())
+            .map_err(|_| NormalizedRebindError::ResourceLimit)?;
+        let repository = record.repository;
+        let rebound = rebind_extension(
+            record.clone(),
+            repository,
+            GENERATION_NEUTRAL_ID,
+            &self.ids,
+            &mut checkpoint,
+        )?;
+        ensure_projection_continues(&mut checkpoint)?;
+        Ok(rebound.id)
     }
 }
 
@@ -343,8 +378,25 @@ fn canonical_generation_neutral_digests_for_prevalidated_document(
     document: &NormalizedIrDocument,
     mut checkpoint: impl FnMut() -> bool,
 ) -> Result<CanonicalGenerationNeutralDigests, NormalizedRebindError> {
-    require_supported_extensions_with_checkpoint(document, &mut checkpoint)?;
-    let ids = derive_fact_id_map(document, GENERATION_NEUTRAL_ID, &mut checkpoint)?;
+    digest_with_rdf(
+        document,
+        &mut rdf_digest::EmptyRdfSource,
+        0,
+        &IrLimits::default(),
+        &mut checkpoint,
+    )
+}
+
+fn digest_with_rdf(
+    document: &NormalizedIrDocument,
+    source: &mut impl RdfDigestSource,
+    count: usize,
+    limits: &IrLimits,
+    checkpoint: &mut impl FnMut() -> bool,
+) -> Result<CanonicalGenerationNeutralDigests, NormalizedRebindError> {
+    require_supported_extensions_with_checkpoint(document, checkpoint)?;
+    let ids = derive_fact_id_map(document, GENERATION_NEUTRAL_ID, &mut *checkpoint)?;
+    let external = rdf_digest::collect(document, &ids, source, count, limits, checkpoint)?;
     let mut hashers = LogicalProjectionHashers::new();
     hashers
         .complete
@@ -354,19 +406,19 @@ fn canonical_generation_neutral_digests_for_prevalidated_document(
     hashers.complete.category(1, document.files.len())?;
     hashers.stable.category(1, document.files.len())?;
     for record in &document.files {
-        ensure_projection_continues(&mut checkpoint)?;
-        let record = rebind_file(record.clone(), GENERATION_NEUTRAL_ID, &ids, &mut checkpoint)?;
+        ensure_projection_continues(checkpoint)?;
+        let record = rebind_file(record.clone(), GENERATION_NEUTRAL_ID, &ids, checkpoint)?;
         hashers.complete.record(&record)?;
-        ensure_projection_continues(&mut checkpoint)?;
+        ensure_projection_continues(checkpoint)?;
         hashers.stable.record(&record.id)?;
     }
     hashers.complete.category(2, document.entities.len())?;
     hashers.stable.category(2, document.entities.len())?;
     for record in &document.entities {
-        ensure_projection_continues(&mut checkpoint)?;
-        let record = rebind_entity(record.clone(), GENERATION_NEUTRAL_ID, &ids, &mut checkpoint)?;
+        ensure_projection_continues(checkpoint)?;
+        let record = rebind_entity(record.clone(), GENERATION_NEUTRAL_ID, &ids, checkpoint)?;
         hashers.complete.record(&record)?;
-        ensure_projection_continues(&mut checkpoint)?;
+        ensure_projection_continues(checkpoint)?;
         hashers.stable.record(&record.id)?;
     }
 
@@ -383,7 +435,15 @@ fn canonical_generation_neutral_digests_for_prevalidated_document(
         (7, document.coverage_records.len(), FactLocation::Coverage),
         (8, document.skipped_regions.len(), FactLocation::Skipped),
         (9, document.diagnostics.len(), FactLocation::Diagnostic),
-        (10, document.extensions.len(), FactLocation::Extension),
+        (
+            10,
+            document
+                .extensions
+                .len()
+                .checked_add(external.len())
+                .ok_or(NormalizedRebindError::ResourceLimit)?,
+            FactLocation::Extension,
+        ),
     ];
     let mut scratch = NormalizedIrDocument::empty(document.repository, GENERATION_NEUTRAL_ID);
     scratch.version = document.version;
@@ -402,7 +462,15 @@ fn canonical_generation_neutral_digests_for_prevalidated_document(
             .try_reserve_exact(length)
             .map_err(|_| NormalizedRebindError::ResourceLimit)?;
         for index in 0..length {
-            ensure_projection_continues(&mut checkpoint)?;
+            ensure_projection_continues(checkpoint)?;
+            if category == 10 && index >= document.extensions.len() {
+                let offset = index - document.extensions.len();
+                let (neutral, _) = external
+                    .get(offset)
+                    .ok_or(NormalizedRebindError::IdentityRecipe)?;
+                neutral_order.push((*neutral, index));
+                continue;
+            }
             let location = constructor(index);
             let old_id = location.id(document);
             let new_id = ids
@@ -410,31 +478,58 @@ fn canonical_generation_neutral_digests_for_prevalidated_document(
                 .ok_or(NormalizedRebindError::IdentityRecipe)?;
             neutral_order.push((new_id, index));
         }
-        ensure_projection_continues(&mut checkpoint)?;
+        ensure_projection_continues(checkpoint)?;
         // Rust's in-place sort is an atomic bounded step. The admitted compact
         // workspace bounds its input, while checkpoints bracket the operation.
         neutral_order.sort_unstable();
-        ensure_projection_continues(&mut checkpoint)?;
+        ensure_projection_continues(checkpoint)?;
         for pair in neutral_order.windows(2) {
-            ensure_projection_continues(&mut checkpoint)?;
+            ensure_projection_continues(checkpoint)?;
             if pair[0].0 == pair[1].0 {
                 return Err(NormalizedRebindError::IdentityRecipe);
             }
         }
-        for (_, index) in neutral_order {
-            ensure_projection_continues(&mut checkpoint)?;
+        for (neutral, index) in neutral_order {
+            ensure_projection_continues(checkpoint)?;
+            if category == 10 && index >= document.extensions.len() {
+                let (_, original) = external
+                    .get(index - document.extensions.len())
+                    .ok_or(NormalizedRebindError::IdentityRecipe)?;
+                let record = source.read(*original)?;
+                if record.id != *original {
+                    return Err(NormalizedRebindError::IdentityRecipe);
+                }
+                rdf_digest::require_record(document, &record, limits)?;
+                let rebound = rebind_extension(
+                    record,
+                    document.repository,
+                    GENERATION_NEUTRAL_ID,
+                    &ids,
+                    checkpoint,
+                )?;
+                if rebound.id != neutral {
+                    return Err(NormalizedRebindError::IdentityRecipe);
+                }
+                hashers.complete.record(&rebound)?;
+                hashers.stable.record(&neutral)?;
+                continue;
+            }
             hash_rebound_fact(
                 constructor(index),
                 document,
                 &ids,
                 &mut scratch,
                 &mut hashers,
-                &mut checkpoint,
+                checkpoint,
             )?;
         }
     }
 
-    let records = checked_record_count(document)?;
+    let records = checked_record_count(document)?
+        .checked_add(
+            u64::try_from(external.len()).map_err(|_| NormalizedRebindError::ResourceLimit)?,
+        )
+        .ok_or(NormalizedRebindError::ResourceLimit)?;
     let coverage_records = document
         .coverage_records
         .len()
@@ -1927,6 +2022,7 @@ fn ensure_projection_continues(
 
 #[cfg(test)]
 mod tests {
+    mod rdf_digest;
     use super::*;
     use crate::{
         ContainerRef, EntityKind, FileIdentityClaim, IrDocument, LEXICAL_EXTENSION_NAMESPACE,

@@ -3375,6 +3375,9 @@ pub enum QueryError {
     /// The requested retained generation was unavailable.
     #[error("query generation is not retained")]
     GenerationNotFound,
+    /// The complete retained graph requires its logical-reader lease.
+    #[error("logical generation requires a reader lease")]
+    LogicalGenerationRequiresReader,
     /// The retained generation capacity was exhausted.
     #[error("query generation retention limit was reached")]
     RetentionLimit,

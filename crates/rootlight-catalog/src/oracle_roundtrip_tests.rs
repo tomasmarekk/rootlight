@@ -2362,6 +2362,198 @@ fn rdf_partition_pages_enforce_exact_source_and_metadata_text_budgets() {
     );
 }
 
+fn logical_rdf_digest(
+    reader: &OracleReader,
+    context: &GenerationContext<'_>,
+) -> rootlight_ir::CanonicalGenerationNeutralDigests {
+    let base = reader
+        .read_rdf_base_with_admission(context, |plan, retained_hint_bytes| {
+            assert_eq!(
+                plan.stats().layout(),
+                rootlight_storage::GenerationStatsLayout::CanonicalOracle
+            );
+            assert_eq!(
+                retained_hint_bytes,
+                reader
+                    .rdf_partitions
+                    .iter()
+                    .map(|part| part.neutral_id_bytes().unwrap())
+                    .sum::<u64>()
+            );
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+    let (_, mut document, _) = base.into_base_parts();
+    document
+        .extensions
+        .retain(|record| record.namespace != rootlight_storage::RDF_PARTITION_SET_NAMESPACE);
+    let mut source = crate::OracleRdfDigestSource::new(reader, *context).unwrap();
+    let count = source.count();
+    let digest = rootlight_ir::canonical_generation_neutral_digests_with_rdf(
+        &document,
+        &IrLimits::default(),
+        &ExtensionSupport::default(),
+        &mut source,
+        count,
+        || context.check().is_ok(),
+    );
+    if let Some(error) = source.take_error() {
+        panic!(
+            "authenticated RDF digest backend refused: {error:?}; cause: {:?}",
+            std::error::Error::source(&error)
+        );
+    }
+    let digest = digest.unwrap();
+    assert_eq!(
+        digest.records(),
+        u64::try_from(
+            rootlight_ir::IrDocumentUsage::measure(&document, &IrLimits::default())
+                .unwrap()
+                .total_records()
+                + count
+        )
+        .unwrap()
+    );
+    digest
+}
+
+#[test]
+fn authenticated_rdf_reader_preserves_flat_generation_neutral_digests() {
+    use crate::RdfPartitionStage;
+    use rootlight_storage::{
+        IdentityVerifiedRdfBase, SourceFileCatalog, UnpublishedRdfPartition,
+        new_rdf_partition_set_envelopes,
+    };
+    let text = "_:a <urn:p> \"value\" .";
+    let parent = rdf_partition_parent(2, text, 3, b"rdf-neutral-flat-parity");
+    let cancellation = Cancellation::new();
+    let context = default_context(&cancellation);
+    let limits = IrLimits::default();
+    let directory = TempDir::new().unwrap();
+    let mut flat = parent.document().clone();
+    let mut descriptors = Vec::new();
+    for file in &parent.document().files {
+        let records = rdf_partition_records(&parent, file.id, text, 3);
+        flat.extensions.extend(records.clone());
+        let partition = UnpublishedRdfPartition::admit(
+            parent.metadata(),
+            file.id,
+            file.content_hash,
+            file.byte_length,
+            records,
+            &limits,
+            &context,
+        )
+        .unwrap();
+        let estimate = RdfPartitionStage::storage_estimate(&partition).unwrap();
+        let reader = RdfPartitionStage::write_in(
+            directory.path(),
+            partition,
+            estimate.admit(estimate.required_bytes()).unwrap(),
+            &context,
+        )
+        .unwrap()
+        .authenticate(&parent, &limits, &context)
+        .unwrap();
+        descriptors.push(reader.descriptor().clone());
+    }
+    let verified_flat = IdentityVerifiedGeneration::verify(
+        parent.metadata(),
+        flat,
+        &limits,
+        &ExtensionSupport::default(),
+        &context,
+    )
+    .unwrap();
+    let expected = verified_flat.generation_neutral_digests(&context).unwrap();
+    let mut base = parent.document().clone();
+    base.extensions
+        .extend(new_rdf_partition_set_envelopes(&parent, &descriptors, &context).unwrap());
+    let base = IdentityVerifiedRdfBase::verify(
+        parent.metadata(),
+        base,
+        SourceFileCatalog::default(),
+        &limits,
+        &context,
+    )
+    .unwrap();
+    OracleWriter::create_in(directory.path())
+        .unwrap()
+        .write_rdf_base(base, &context)
+        .unwrap();
+    let reader = OracleReader::open_in(directory.path(), &context).unwrap();
+    let refused = reader.read_rdf_base_with_admission(&context, |_, retained_hint_bytes| {
+        assert!(retained_hint_bytes > 0);
+        Err("rdf-owner-admission")
+    });
+    assert!(matches!(
+        refused,
+        Err(crate::OracleReadAdmissionError::Admission(
+            "rdf-owner-admission"
+        ))
+    ));
+    reader
+        .base_connection
+        .as_ref()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .progress_handler(1, Some(|| true))
+        .expect("stale creator cancellation handler installs");
+    assert_eq!(logical_rdf_digest(&reader, &context), expected);
+    let one_pass_text = reader
+        .rdf_partitions
+        .iter()
+        .try_fold(0_u64, |total, part| {
+            let labels = u64::try_from(rootlight_ir::RDF_STATEMENT_NAMESPACE.len() + 1).unwrap();
+            total
+                .checked_add(part.census().payload_utf8_bytes())?
+                .checked_add(part.descriptor().record_count().checked_mul(labels)?)
+        })
+        .unwrap();
+    let budget = |text| {
+        GenerationBudget::new(
+            context.budget().limit(GenerationResource::Rows),
+            context.budget().limit(GenerationResource::SourceReferences),
+            text,
+        )
+        .unwrap()
+    };
+    let bounded = GenerationContext::new(&cancellation, budget(one_pass_text));
+    let mut source = crate::OracleRdfDigestSource::new(&reader, bounded).unwrap();
+    let count = source.count();
+    assert_eq!(
+        rootlight_ir::canonical_generation_neutral_digests_with_rdf(
+            parent.document(),
+            &limits,
+            &ExtensionSupport::default(),
+            &mut source,
+            count,
+            || true
+        )
+        .unwrap(),
+        expected
+    );
+    assert!(source.take_error().is_none());
+    let refused = GenerationContext::new(&cancellation, budget(one_pass_text - 1));
+    let mut source = crate::OracleRdfDigestSource::new(&reader, refused).unwrap();
+    let count = source.count();
+    assert!(
+        rootlight_ir::canonical_generation_neutral_digests_with_rdf(
+            parent.document(),
+            &limits,
+            &ExtensionSupport::default(),
+            &mut source,
+            count,
+            || true
+        )
+        .is_err()
+    );
+    assert!(
+        matches!(source.take_error().unwrap().kind(), CatalogErrorKind::BudgetExceeded { resource: GenerationResource::TextBytes, observed, limit } if limit == one_pass_text - 1 && observed == one_pass_text)
+    );
+}
+
 #[test]
 fn rdf_partitions_cold_read_beyond_the_production_owned_payload_limit() {
     use crate::{RdfPartitionStage, RdfPartitionWriter};
@@ -2506,6 +2698,8 @@ fn rdf_partitions_cold_read_beyond_the_production_owned_payload_limit() {
         .write_rdf_base(base, &context)
         .unwrap();
     let reader = OracleReader::open_in(directory.path(), &context).unwrap();
+    let digest = logical_rdf_digest(&reader, &context);
+    assert!(digest.records() >= 520);
     assert_eq!(reader.stats().extensions(), total);
     assert_eq!(
         reader.stats().layout(),

@@ -9,7 +9,9 @@
 mod codec;
 mod indexed_read;
 mod layout_census;
+mod rdf_digest;
 mod rdf_partition;
+pub use rdf_digest::OracleRdfDigestSource;
 mod read;
 mod schema;
 mod write;
@@ -597,6 +599,30 @@ impl OracleReader {
                 .parent()
                 .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))?;
             let mut logical_stats = stats;
+            let rdf_count = base.partitions().iter().try_fold(0_u64, |total, part| {
+                total
+                    .checked_add(part.record_count())
+                    .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))
+            })?;
+            context
+                .require(GenerationResource::Rows, rdf_count)
+                .map_err(CatalogError::control)?;
+            let mut common = base.base_document().clone();
+            common.extensions.retain(|record| {
+                record.namespace != rootlight_storage::RDF_PARTITION_SET_NAMESPACE
+            });
+            let neutral_ids = rootlight_ir::GenerationNeutralFactIdIndex::new(
+                &common,
+                &rootlight_ir::IrLimits::default(),
+                &rootlight_ir::ExtensionSupport::default(),
+                || context.check().is_ok(),
+            )
+            .map_err(|_| {
+                context.check().map_or_else(CatalogError::control, |()| {
+                    CatalogError::new(CatalogErrorKind::Corrupt)
+                })
+            })?;
+            drop(common);
             let mut partitions = Vec::new();
             partitions
                 .try_reserve_exact(base.partitions().len())
@@ -607,6 +633,7 @@ impl OracleReader {
                     descriptor,
                     &base,
                     &connection,
+                    &neutral_ids,
                     context,
                 )?;
                 logical_stats = partition
@@ -722,6 +749,54 @@ impl OracleReader {
         let result = read(&connection)?;
         context.check().map_err(CatalogError::control)?;
         Ok(result)
+    }
+
+    /// Admits and reads only the verified incomplete base of this complete RDF set.
+    ///
+    /// The returned capability cannot enter canonical generation APIs. Callers
+    /// retain this complete logical reader when projecting or reading its leaves.
+    /// The callback also receives its retained neutral-ID capacity charge, which
+    /// remains owned until the reader and its final lease are dropped.
+    ///
+    /// # Errors
+    /// Rejects a canonical-only reader, base/set identity drift, caller admission,
+    /// corruption and cancellation without reconstructing RDF leaf payloads.
+    pub fn read_rdf_base_with_admission<E>(
+        &self,
+        context: &GenerationContext<'_>,
+        admit: impl FnOnce(OracleReadMemoryPlan, u64) -> Result<(), E>,
+    ) -> Result<IdentityVerifiedRdfBase, OracleReadAdmissionError<E>> {
+        context.check().map_err(CatalogError::control)?;
+        let connection = self
+            .base_connection
+            .as_ref()
+            .ok_or_else(|| CatalogError::new(CatalogErrorKind::PartitionedMaterializationRequired))?
+            .lock()
+            .map_err(|_| CatalogError::new(CatalogErrorKind::Corrupt))?;
+        schema::install_generation_cancellation(&connection, context)?;
+        let retained_hint_bytes = self.rdf_partitions.iter().try_fold(0_u64, |total, part| {
+            total
+                .checked_add(part.neutral_id_bytes()?)
+                .ok_or_else(|| CatalogError::new(CatalogErrorKind::Corrupt))
+        })?;
+        let base = read::read_rdf_base_with_admission(
+            &connection,
+            self.metadata,
+            self.base_stats,
+            context,
+            |plan| admit(plan, retained_hint_bytes),
+        )?;
+        if base.partitions().len() != self.rdf_partitions.len()
+            || base
+                .partitions()
+                .iter()
+                .zip(&self.rdf_partitions)
+                .any(|(expected, part)| expected != part.descriptor())
+        {
+            return Err(CatalogError::new(CatalogErrorKind::Corrupt).into());
+        }
+        context.check().map_err(CatalogError::control)?;
+        Ok(base)
     }
 
     fn require_materializable(&self, context: &GenerationContext<'_>) -> Result<(), CatalogError> {
