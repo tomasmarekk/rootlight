@@ -22,11 +22,12 @@ struct OwnerProof {
 }
 
 #[derive(Default)]
-struct CacheEntry {
+struct CacheEntry<'tree> {
     owner: Option<Option<OwnerProof>>,
     chain: Option<bool>,
     uses: Option<UseContext>,
     formals: Option<HashMap<(usize, usize), bool>>,
+    parent: Option<Option<Node<'tree>>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -37,15 +38,19 @@ enum UseContext {
 }
 
 /// Owner and context proofs share the caller's existing capture/body ceiling.
-pub(super) struct CaptureCache {
-    entries: HashMap<usize, CacheEntry>,
+pub(super) struct CaptureCache<'tree> {
+    entries: HashMap<usize, CacheEntry<'tree>>,
     maximum_entries: usize,
     exhausted: bool,
     formal_file: Option<bool>,
     formal_owners: HashMap<String, bool>,
+    #[cfg(test)]
+    legacy_parent_walks: bool,
+    #[cfg(test)]
+    native_parent_searches: usize,
 }
 
-impl CaptureCache {
+impl<'tree> CaptureCache<'tree> {
     /// Creates a bounded cache without reserving source-sized storage.
     pub(super) fn new(maximum_entries: usize) -> Self {
         Self {
@@ -54,12 +59,38 @@ impl CaptureCache {
             exhausted: false,
             formal_file: None,
             formal_owners: HashMap::new(),
+            #[cfg(test)]
+            legacy_parent_walks: false,
+            #[cfg(test)]
+            native_parent_searches: 0,
         }
     }
 
     /// Reports a proof bound that the caller must propagate as a capture limit.
     pub(super) const fn exhausted(&self) -> bool {
         self.exhausted
+    }
+
+    fn parent(&mut self, node: Node<'tree>) -> Option<Node<'tree>> {
+        #[cfg(test)]
+        if self.legacy_parent_walks {
+            self.native_parent_searches += 1;
+            return node.parent();
+        }
+        if let Some(parent) = self.entries.get(&node.id()).and_then(|entry| entry.parent) {
+            return parent;
+        }
+        // Native parent lookup descends from the tree root and scans siblings.
+        // Share that result across owner, context and formal-use proofs.
+        #[cfg(test)]
+        {
+            self.native_parent_searches += 1;
+        }
+        let parent = node.parent();
+        if let Some(entry) = self.entries.get_mut(&node.id()) {
+            entry.parent = Some(parent);
+        }
+        parent
     }
 
     fn admit_entry(&mut self, id: usize) -> Result<bool, AdapterError> {
@@ -79,7 +110,7 @@ impl CaptureCache {
 
     fn owner(
         &mut self,
-        node: Node<'_>,
+        node: Node<'tree>,
         source: &[u8],
         cancellation: &Cancellation,
     ) -> Result<Option<OwnerProof>, AdapterError> {
@@ -103,7 +134,7 @@ impl CaptureCache {
 
     fn chain(
         &mut self,
-        node: Node<'_>,
+        node: Node<'tree>,
         source: &[u8],
         cancellation: &Cancellation,
     ) -> Result<bool, AdapterError> {
@@ -131,7 +162,7 @@ impl CaptureCache {
                 valid = false;
                 break;
             }
-            current = owner.parent();
+            current = self.parent(owner);
         }
         for id in pending {
             cancellation.check()?;
@@ -144,7 +175,7 @@ impl CaptureCache {
 
     fn uses(
         &mut self,
-        node: Node<'_>,
+        node: Node<'tree>,
         cancellation: &Cancellation,
     ) -> Result<UseContext, AdapterError> {
         let mut current = Some(node);
@@ -163,11 +194,11 @@ impl CaptureCache {
                 .try_reserve(1)
                 .map_err(|_| SinkError::AllocationFailed)?;
             pending.push(owner);
-            current = owner.parent();
+            current = self.parent(owner);
         }
         for child in pending.into_iter().rev() {
             cancellation.check()?;
-            if let Some(parent) = child.parent() {
+            if let Some(parent) = self.parent(child) {
                 context = child_use_context(context, parent, child);
             }
             if let Some(entry) = self.entries.get_mut(&child.id()) {
@@ -179,7 +210,7 @@ impl CaptureCache {
 
     fn formal_file(
         &mut self,
-        mut root: Node<'_>,
+        mut root: Node<'tree>,
         source: &[u8],
         cancellation: &Cancellation,
     ) -> Result<bool, AdapterError> {
@@ -187,7 +218,7 @@ impl CaptureCache {
             return Ok(checked);
         }
         self.formal_file = Some(false);
-        while let Some(parent) = root.parent() {
+        while let Some(parent) = self.parent(root) {
             cancellation.check()?;
             root = parent;
         }
@@ -238,14 +269,18 @@ impl CaptureCache {
         loop {
             let node = cursor.node();
             cancellation.check()?;
+            let root_child = cursor.depth() == 1;
+            #[cfg(test)]
+            let root_child = if guard.is_some() && self.legacy_parent_walks {
+                self.parent(node) == Some(root)
+            } else {
+                root_child
+            };
             if !self.admit_entry(node.id())?
                 || (node.kind().starts_with("preproc_")
                     && Some(node.id()) != guard
                     && Some(node.id()) != guard_define)
-                || (guard.is_some()
-                    && node.parent() == Some(root)
-                    && !node.is_extra()
-                    && Some(node.id()) != guard)
+                || (guard.is_some() && root_child && !node.is_extra() && Some(node.id()) != guard)
                 || (guard_name.is_some()
                     && guard_name
                         .as_ref()
@@ -297,7 +332,7 @@ impl CaptureCache {
 
     fn inspect_formals(
         &mut self,
-        function: Node<'_>,
+        function: Node<'tree>,
         source: &[u8],
         cancellation: &Cancellation,
     ) -> Result<HashMap<(usize, usize), bool>, AdapterError> {
@@ -410,11 +445,17 @@ impl CaptureCache {
 
     fn formal_use(
         &mut self,
-        node: Node<'_>,
+        node: Node<'tree>,
         source: &[u8],
         cancellation: &Cancellation,
     ) -> Result<Option<bool>, AdapterError> {
-        let mut ancestor = node.parent();
+        let file_refused = self.formal_file == Some(false);
+        #[cfg(test)]
+        let file_refused = file_refused && !self.legacy_parent_walks;
+        if file_refused {
+            return Ok(None);
+        }
+        let mut ancestor = self.parent(node);
         while let Some(function) = ancestor {
             cancellation.check()?;
             // Initializers are owned by their variable in public IR. Their
@@ -440,7 +481,7 @@ impl CaptureCache {
                     .and_then(|uses| uses.get(&(node.start_byte(), node.end_byte())))
                     .copied());
             }
-            ancestor = function.parent();
+            ancestor = self.parent(function);
         }
         Ok(None)
     }
@@ -897,11 +938,11 @@ fn namespace_body<'tree>(
     Ok((stage == 3).then_some(body))
 }
 
-fn physical_position(
-    node: Node<'_>,
+fn physical_position<'tree>(
+    node: Node<'tree>,
     source: &[u8],
     cancellation: &Cancellation,
-    cache: &mut CaptureCache,
+    cache: &mut CaptureCache<'tree>,
 ) -> Result<bool, AdapterError> {
     let mut child = node;
     while let Some(parent) = child.parent() {
@@ -965,11 +1006,11 @@ fn owner_kind(node: Node<'_>) -> bool {
     )
 }
 
-fn declaration_proof(
-    node: Node<'_>,
+fn declaration_proof<'tree>(
+    node: Node<'tree>,
     source: &[u8],
     cancellation: &Cancellation,
-    cache: &mut CaptureCache,
+    cache: &mut CaptureCache<'tree>,
     mut proof: OwnerProof,
 ) -> Result<Option<OwnerProof>, AdapterError> {
     if !physical_position(node, source, cancellation, cache)?
@@ -1058,11 +1099,11 @@ fn declaration_proof(
     Ok(Some(proof))
 }
 
-fn owner_proof(
-    node: Node<'_>,
+fn owner_proof<'tree>(
+    node: Node<'tree>,
     source: &[u8],
     cancellation: &Cancellation,
-    cache: &mut CaptureCache,
+    cache: &mut CaptureCache<'tree>,
 ) -> Result<Option<OwnerProof>, AdapterError> {
     cancellation.check()?;
     if !clean(node, source) {
@@ -1281,12 +1322,12 @@ fn child_use_context(context: UseContext, parent: Node<'_>, child: Node<'_>) -> 
 ///
 /// Exhaustion becomes the caller's existing capture-limit evidence. Buffer-body
 /// containment is raw physical context, not a scope or a buffer-label identity.
-pub(super) fn retain_capture(
-    node: Node<'_>,
+pub(super) fn retain_capture<'tree>(
+    node: Node<'tree>,
     role: StructuralRole,
     source: &[u8],
     cancellation: &Cancellation,
-    cache: &mut CaptureCache,
+    cache: &mut CaptureCache<'tree>,
 ) -> Result<bool, AdapterError> {
     cancellation.check()?;
     if node.kind() == "translation_unit" {
@@ -1345,11 +1386,11 @@ pub(super) fn retain_capture(
         && cache.owner(node, source, cancellation)?.is_some())
 }
 
-fn expression_syntax(
-    node: Node<'_>,
+fn expression_syntax<'tree>(
+    node: Node<'tree>,
     source: &[u8],
     cancellation: &Cancellation,
-    cache: &mut CaptureCache,
+    cache: &mut CaptureCache<'tree>,
 ) -> Result<&'static str, AdapterError> {
     if node.kind().starts_with("preproc_") {
         return Ok("hlsl.preprocessor_context");
@@ -1404,12 +1445,12 @@ fn expression_syntax(
 /// Native formal certificates distinguish binding from unambiguous value use.
 /// Other references promise no resolved call, constructor or member target.
 /// Constant-buffer context spans include the raw header, label and binding bytes.
-pub(super) fn candidate(
-    node: Node<'_>,
+pub(super) fn candidate<'tree>(
+    node: Node<'tree>,
     mut role: StructuralRole,
     source: &[u8],
     cancellation: &Cancellation,
-    cache: &mut CaptureCache,
+    cache: &mut CaptureCache<'tree>,
 ) -> Result<QueryCandidate, AdapterError> {
     cancellation.check()?;
     let mut range = node.byte_range();
@@ -1505,8 +1546,10 @@ pub(super) fn candidate(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use rootlight_cancel::CancellationReason;
-    use tree_sitter::{Parser, Tree};
+    use tree_sitter::{Parser, QueryCursor, StreamingIterator, Tree};
 
     use super::*;
 
@@ -1889,6 +1932,107 @@ mod tests {
         full.sort_unstable();
         full.dedup();
         assert_eq!(required_only, full);
+    }
+
+    #[test]
+    fn wide_native_captures_preserve_facts_and_reduce_parent_searches() {
+        let mut body = String::from("float Wide(float Value) { float Local = Value;\n");
+        for index in 0..1000 {
+            body.push_str(&format!("Local = Local + {index}.0;\n"));
+        }
+        body.push_str("return Value; }\n");
+        for (label, source) in [
+            (
+                "guard",
+                format!("#ifndef WIDE_GUARD\n#define WIDE_GUARD\n{body}#endif\n"),
+            ),
+            ("macro", format!("#define EXTERNAL 1\n{body}")),
+        ] {
+            let tree = tree(source.as_bytes());
+            assert!(!tree.root_node().has_error());
+            let pack = super::super::QueryPack::compile(
+                crate::GrammarFamily::Hlsl,
+                include_str!("../../queries/hlsl.scm"),
+            )
+            .unwrap();
+            let cancellation = Cancellation::new();
+            let collect = |legacy| {
+                let started = Instant::now();
+                let mut captures = Vec::new();
+                let mut searches = 0;
+                let mut entries = 0;
+                for query in [&pack.identity_query, &pack.optional_query] {
+                    let mut cache = CaptureCache::new(100_000);
+                    cache.legacy_parent_walks = legacy;
+                    let mut cursor = QueryCursor::new();
+                    let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
+                    while let Some(matched) = matches.next() {
+                        for capture in matched.captures {
+                            let role =
+                                pack.roles_by_capture[usize::try_from(capture.index).unwrap()];
+                            if retain_capture(
+                                capture.node,
+                                role,
+                                source.as_bytes(),
+                                &cancellation,
+                                &mut cache,
+                            )
+                            .unwrap()
+                            {
+                                captures.push(
+                                    candidate(
+                                        capture.node,
+                                        role,
+                                        source.as_bytes(),
+                                        &cancellation,
+                                        &mut cache,
+                                    )
+                                    .unwrap(),
+                                );
+                            }
+                        }
+                    }
+                    assert!(!cache.exhausted());
+                    searches += cache.native_parent_searches;
+                    entries += cache.entries.len();
+                }
+                captures.sort_unstable_by_key(|capture| {
+                    (
+                        capture.start,
+                        capture.end,
+                        capture.role,
+                        capture.syntax,
+                        capture.required,
+                        capture.native_depth,
+                    )
+                });
+                (captures, searches, entries, started.elapsed())
+            };
+            let (legacy, legacy_searches, _, legacy_time) = collect(true);
+            let (cached, cached_searches, entries, cached_time) = collect(false);
+            assert_eq!(cached, legacy, "{label}");
+            assert!(cached_searches < legacy_searches, "{label}");
+            assert!(
+                cached_searches <= entries,
+                "native parent searches must be memoized once per admitted node"
+            );
+            if label == "macro" {
+                assert!(!cached.iter().any(|capture| matches!(
+                    capture.syntax,
+                    "hlsl.formal_binding" | "hlsl.formal_value"
+                )));
+            } else {
+                assert!(
+                    cached
+                        .iter()
+                        .any(|capture| capture.syntax == "hlsl.formal_value")
+                );
+            }
+            eprintln!(
+                "hlsl wide {label}: legacy={legacy_time:?} cached={cached_time:?}; native parent searches {legacy_searches}->{cached_searches}; {} identical captures",
+                cached.len()
+            );
+        }
     }
 
     #[test]
