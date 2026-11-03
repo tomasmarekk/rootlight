@@ -3631,11 +3631,11 @@ impl QueryPack {
                     })
                 } else {
                     candidate_for_capture(
-                        input.family,
+                        input,
                         capture,
                         role,
-                        input.source,
-                        input.cancellation,
+                        limits.body_nodes,
+                        complete_file_input,
                         &mut fsharp_captures,
                         &mut plsql_captures,
                     )
@@ -4486,14 +4486,20 @@ fn cpp_anonymous_namespace(
 }
 
 fn candidate_for_capture(
-    family: GrammarFamily,
+    input: QueryInput<'_>,
     capture: QueryCapture<'_>,
     role: StructuralRole,
-    source: &[u8],
-    cancellation: &Cancellation,
+    maximum_nodes: usize,
+    complete_file_input: bool,
     fsharp_captures: &mut fsharp::CaptureCache,
     plsql_captures: &mut plsql::CaptureCache,
 ) -> Result<QueryCandidate, AdapterError> {
+    let QueryInput {
+        family,
+        source,
+        cancellation,
+        ..
+    } = input;
     if family == GrammarFamily::Sql
         && role == StructuralRole::Signature
         && sql::recovered_body(capture.node, cancellation)?
@@ -4922,6 +4928,13 @@ fn candidate_for_capture(
             if family == GrammarFamily::C && is_c_function_prototype(capture.node) =>
         {
             "c.function"
+        }
+        StructuralRole::Declaration
+            if family == GrammarFamily::Cpp
+                && complete_file_input
+                && is_cpp_function_prototype(capture.node, maximum_nodes, cancellation)? =>
+        {
+            "cpp.function"
         }
         StructuralRole::ScopeTrait => "rust.impl_trait",
         StructuralRole::ScopeType => "rust.impl_type",
@@ -5395,6 +5408,166 @@ fn is_c_function_prototype(node: tree_sitter::Node<'_>) -> bool {
         }
     }
     false
+}
+
+fn is_cpp_function_prototype(
+    node: tree_sitter::Node<'_>,
+    maximum_nodes: usize,
+    cancellation: &Cancellation,
+) -> Result<bool, AdapterError> {
+    if node.kind() != "declaration"
+        || node.is_missing()
+        || node.has_error()
+        || node.child_by_field_name("type").is_none()
+        || node.child_by_field_name("value").is_some()
+        || node.child_by_field_name("default_value").is_some()
+    {
+        return Ok(false);
+    }
+    let maximum = maximum_nodes.min(HARD_MAX_QUERY_FACTS);
+    let mut visited = 0_usize;
+    let mut step = || -> Result<(), AdapterError> {
+        cancellation.check()?;
+        if visited >= maximum {
+            return Err(AdapterError::Sink(SinkError::StreamLimit {
+                resource: ResourceKind::SyntaxNodes,
+                observed: visited.saturating_add(1),
+                limit: maximum,
+            }));
+        }
+        visited += 1;
+        Ok(())
+    };
+
+    // A declaration can own several declarators; selecting its first field alone
+    // would misclassify mixed variable/function declarations as one function.
+    let mut declarator = None;
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            step()?;
+            if cursor.field_name() == Some("declarator") {
+                if declarator.is_some() {
+                    return Ok(false);
+                }
+                declarator = Some(cursor.node());
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+    let Some(mut declarator) = declarator else {
+        return Ok(false);
+    };
+
+    // Only written namespace headers and the translation unit establish the
+    // free-function owner here. Recovery in a later sibling is independent.
+    let mut current = node;
+    loop {
+        step()?;
+        let Some(parent) = current.parent() else {
+            return Ok(false);
+        };
+        if !matches!(parent.kind(), "translation_unit" | "declaration_list") {
+            return Ok(false);
+        }
+        // Earlier recovery can hide an enclosing owner. Later recovery cannot
+        // change this already written declaration's owner boundary.
+        if parent.has_error() {
+            let mut earlier = parent.walk();
+            if !earlier.goto_first_child() {
+                return Ok(false);
+            }
+            loop {
+                step()?;
+                let sibling = earlier.node();
+                if sibling == current {
+                    break;
+                }
+                if sibling.is_missing() || sibling.has_error() {
+                    return Ok(false);
+                }
+                if !earlier.goto_next_sibling() {
+                    return Ok(false);
+                }
+            }
+        }
+        if parent.kind() == "translation_unit" {
+            if parent.parent().is_some() {
+                return Ok(false);
+            }
+            break;
+        }
+        if parent.kind() != "declaration_list" || parent.is_missing() || parent.is_error() {
+            return Ok(false);
+        }
+        let Some(namespace) = parent
+            .parent()
+            .filter(|owner| owner.kind() == "namespace_definition")
+        else {
+            return Ok(false);
+        };
+        let Some(name) = namespace.child_by_field_name("name") else {
+            return Ok(false);
+        };
+        if namespace.is_missing()
+            || namespace.is_error()
+            || name.is_missing()
+            || name.has_error()
+            || namespace.child_by_field_name("body") != Some(parent)
+            || !parent
+                .child(0)
+                .is_some_and(|opening| opening.kind() == "{" && !opening.is_missing())
+        {
+            return Ok(false);
+        }
+        let mut header = namespace.walk();
+        if !header.goto_first_child() {
+            return Ok(false);
+        }
+        loop {
+            step()?;
+            let child = header.node();
+            if child == parent {
+                break;
+            }
+            if child.is_missing() || child.has_error() || !header.goto_next_sibling() {
+                return Ok(false);
+            }
+        }
+        current = namespace;
+    }
+
+    loop {
+        step()?;
+        declarator = match declarator.kind() {
+            "pointer_declarator" => {
+                let Some(inner) = declarator.child_by_field_name("declarator") else {
+                    return Ok(false);
+                };
+                inner
+            }
+            "reference_declarator" if declarator.named_child_count() == 1 => {
+                let Some(inner) = declarator.named_child(0) else {
+                    return Ok(false);
+                };
+                inner
+            }
+            // Parentheses under the function declarator denote a pointer or
+            // reference variable; an explicitly qualified owner is unproved.
+            "function_declarator" => {
+                return Ok(declarator
+                    .child_by_field_name("declarator")
+                    .is_some_and(|name| {
+                        name.kind() == "identifier"
+                            && !name.is_missing()
+                            && !name.byte_range().is_empty()
+                    }));
+            }
+            _ => return Ok(false),
+        };
+    }
 }
 
 fn is_php_named_class_constructor(method: tree_sitter::Node<'_>, source: &[u8]) -> bool {

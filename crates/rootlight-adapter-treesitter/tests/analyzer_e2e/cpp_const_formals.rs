@@ -16,6 +16,189 @@ const CPP: LanguageCase = LanguageCase {
     body_after: "",
 };
 
+#[test]
+fn cpp_ordinary_prototype_keeps_exact_name_and_written_namespace_owner() {
+    let raw = b"namespace test {\nconstexpr int makeValue();\n}\n";
+    clean(raw);
+    let result = output(CPP, raw, EncodingId::utf8());
+    let doc = result.document();
+    let namespace = entity_at(doc, "test", EntityKind::Module, 10, 14);
+    let function = entity_at(doc, "makeValue", EntityKind::Function, 31, 40);
+    contains(doc, namespace, function, 31, 40);
+    let entity = doc
+        .entities
+        .iter()
+        .find(|entity| entity.id == function)
+        .unwrap();
+    assert_eq!(entity.qualified_name, "test::makeValue");
+}
+
+#[test]
+fn cpp_ordinary_prototypes_keep_return_wrappers_without_body_formals() {
+    for (raw, name, start, end) in [
+        (b"int freeValue();\n".as_slice(), "freeValue", 4, 13),
+        (
+            b"const Value **pointerValue();\n".as_slice(),
+            "pointerValue",
+            14,
+            26,
+        ),
+        (
+            b"Value &referenceValue();\n".as_slice(),
+            "referenceValue",
+            7,
+            21,
+        ),
+        (b"Value &&rvalueValue();\n".as_slice(), "rvalueValue", 8, 19),
+        (
+            b"int consume(const Value &parameter);\n".as_slice(),
+            "consume",
+            4,
+            11,
+        ),
+    ] {
+        clean(raw);
+        let result = output(CPP, raw, EncodingId::utf8());
+        entity_at(result.document(), name, EntityKind::Function, start, end);
+        assert!(
+            !result
+                .document()
+                .entities
+                .iter()
+                .any(|entity| entity.kind == EntityKind::Parameter)
+        );
+    }
+}
+
+#[test]
+fn cpp_ordinary_prototypes_preserve_named_class_methods() {
+    let raw = b"struct Owner { int method(); int *pointerMethod(); int &referenceMethod(); };\n";
+    clean(raw);
+    let result = output(CPP, raw, EncodingId::utf8());
+    let doc = result.document();
+    let owner = entity_at(doc, "Owner", EntityKind::Struct, 7, 12);
+    for (name, start, end) in [
+        ("method", 19, 25),
+        ("pointerMethod", 34, 47),
+        ("referenceMethod", 56, 71),
+    ] {
+        let method = entity_at(doc, name, EntityKind::Method, start, end);
+        contains(doc, owner, method, start, end);
+    }
+}
+
+#[test]
+fn cpp_ordinary_prototypes_refuse_unproved_declarators_and_owners() {
+    for (raw, forbidden) in [
+        ("int variable;", &["variable"][..]),
+        ("int initialized = 1;", &["initialized"][..]),
+        ("int (*callback)(int);", &["callback"][..]),
+        ("int (&callback)(int);", &["callback"][..]),
+        ("using Alias = int(int);", &["Alias"][..]),
+        ("typedef int Alias(int);", &["Alias"][..]),
+        ("int first(), second();", &["first", "second"][..]),
+        ("int mixed(), counter;", &["mixed", "counter"][..]),
+        ("int broken(;", &["broken"][..]),
+        ("int missing()", &["missing"][..]),
+        ("void outer() { int local(); }", &["local"][..]),
+        ("template<class T> int generic(T value);", &["generic"][..]),
+        (
+            "namespace engine {}\nint engine::makeValue();",
+            &["makeValue"][..],
+        ),
+        (
+            "class Owner { friend int friendValue(); };",
+            &["friendValue"][..],
+        ),
+        ("namespace { int hidden(); }", &["hidden"][..]),
+        ("namespace broken\nint hidden();\n}", &["hidden"][..]),
+    ] {
+        let result = output(CPP, raw.as_bytes(), EncodingId::utf8());
+        assert!(
+            !result.document().entities.iter().any(|entity| {
+                matches!(entity.kind, EntityKind::Function | EntityKind::Method)
+                    && forbidden.contains(&entity.canonical_name.as_str())
+            }),
+            "unproved prototype: {raw}; callables={:?}",
+            result
+                .document()
+                .entities
+                .iter()
+                .filter(|entity| matches!(entity.kind, EntityKind::Function | EntityKind::Method))
+                .map(|entity| (
+                    &entity.canonical_name,
+                    &entity.qualified_name,
+                    entity.container
+                ))
+                .collect::<Vec<_>>()
+        );
+        if raw.starts_with("namespace engine") {
+            assert!(result.document().skipped_regions.iter().any(|gap| {
+                gap.domain == rootlight_ir::FactDomain::Entities
+                    && gap.source.span().start_byte() <= 20
+                    && gap.source.span().end_byte() >= 44
+            }));
+        }
+    }
+}
+
+#[test]
+fn cpp_ordinary_prototype_keeps_local_owner_before_unrelated_recovery() {
+    let raw = b"namespace api { int stable(); int broken(; }\n";
+    let result = output(CPP, raw, EncodingId::utf8());
+    let doc = result.document();
+    let owner = entity_at(doc, "api", EntityKind::Module, 10, 13);
+    let function = entity_at(doc, "stable", EntityKind::Function, 20, 26);
+    contains(doc, owner, function, 20, 26);
+    assert!(
+        doc.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "syntax-error-recovery")
+    );
+}
+
+#[test]
+#[ignore = "requires ROOTLIGHT_CPP_PROTOTYPE_ORIGINAL_REPOSITORY; original-file subset only"]
+fn cpp_ordinary_prototype_original_constexpr_keeps_exact_source_and_owner() {
+    const RELATIVE: &str =
+        "scripts/cxx-api/tests/snapshots/should_handle_constexpr_free_function/test.h";
+    let repository = std::path::PathBuf::from(
+        std::env::var_os("ROOTLIGHT_CPP_PROTOTYPE_ORIGINAL_REPOSITORY")
+            .expect("original repository root"),
+    );
+    let path = repository.join(RELATIVE);
+    let raw = fs::read(&path).unwrap();
+    assert_eq!(raw.len(), 285);
+    assert_eq!(&raw[234..260], b"constexpr int makeValue();");
+    clean(&raw);
+    let result = output(
+        LanguageCase {
+            path: RELATIVE,
+            ..CPP
+        },
+        &raw,
+        EncodingId::utf8(),
+    );
+    let doc = result.document();
+    let owner = entity_at(doc, "test", EntityKind::Module, 224, 228);
+    let function = entity_at(doc, "makeValue", EntityKind::Function, 248, 257);
+    contains(doc, owner, function, 248, 257);
+    assert_eq!(
+        doc.entities
+            .iter()
+            .find(|entity| entity.id == function)
+            .unwrap()
+            .qualified_name,
+        "test::makeValue"
+    );
+    assert!(!doc.skipped_regions.iter().any(|gap| {
+        gap.domain == rootlight_ir::FactDomain::Entities
+            && gap.source.span().start_byte() == 234
+            && gap.source.span().end_byte() == 260
+    }));
+    assert_eq!(fs::read(&path).unwrap(), raw);
+}
+
 fn output(case: LanguageCase, bytes: &[u8], encoding: EncodingId) -> AnalysisOutput {
     let provider = Arc::new(provider());
     let fixture = Fixture::new(case, bytes);

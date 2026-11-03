@@ -394,6 +394,78 @@ fn ruby_class_signatures_include_inheritance_without_the_body() {
 }
 
 #[test]
+fn cpp_ordinary_prototype_partial_view_cannot_donate_root_ownership() {
+    let source = b"void outer() { int local(); }\n";
+    let fixture = Fixture::new("partial.cpp", source);
+    let limits = limits(4096, 128);
+    let provider = provider();
+    let range = IncludedRange::new(
+        SourceSpan::new(fixture.snapshot.file(), 15, 27).unwrap(),
+        LanguageId::new("cpp").unwrap(),
+    );
+    let request = request(
+        &fixture.snapshot,
+        &fixture.source,
+        &limits,
+        "cpp",
+        vec![range],
+    );
+    let output = execute_parse(
+        &provider,
+        &request,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    assert!(output.diagnostics().is_empty());
+    assert!(
+        !output
+            .facts()
+            .iter()
+            .any(|fact| fact.syntax_kind().as_str() == "cpp.function.declaration")
+    );
+}
+
+#[test]
+fn cpp_ordinary_prototype_keeps_native_function_classification() {
+    const SOURCE: &[u8] = b"namespace test {\nconstexpr int makeValue();\n}\n";
+    let fixture = Fixture::new("prototype.hpp", SOURCE);
+    let limits = limits(4096, 128);
+    let provider = provider();
+    let request = request(
+        &fixture.snapshot,
+        &fixture.source,
+        &limits,
+        "cpp",
+        Vec::new(),
+    );
+    let output = execute_parse(
+        &provider,
+        &request,
+        MemoryAdmissionPolicy::AllowUnavailableEnforcementFallback,
+        &deadline(),
+    )
+    .unwrap();
+    assert!(output.diagnostics().is_empty());
+    let functions: Vec<_> = output
+        .facts()
+        .iter()
+        .filter(|fact| {
+            fact.kind() == SyntaxFactKind::Declaration
+                && fact.syntax_kind().as_str() == "cpp.function.declaration"
+        })
+        .collect();
+    assert_eq!(functions.len(), 1);
+    assert_eq!(
+        (
+            functions[0].span().start_byte(),
+            functions[0].span().end_byte()
+        ),
+        (17, 43)
+    );
+}
+
+#[test]
 fn c_prototype_captures_distinguish_pointer_returns_from_pointer_variables() {
     const SOURCE: &[u8] = b"extern void flush_output(void);\nconst unsigned char **load_buffer(int count);\nlong (*dispatch)(long);\nlong counter;\n";
     let fixture = Fixture::new("declarations.h", SOURCE);
