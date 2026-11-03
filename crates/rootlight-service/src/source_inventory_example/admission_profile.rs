@@ -6,11 +6,11 @@ use rootlight_adapter_sdk::{AnalysisLimits, BatchThresholds, LimitError, StreamL
 use rootlight_adapter_treesitter::{ParserSettings, RuntimeConfig, RuntimeConfigError};
 use rootlight_ir::IrLimits;
 
-/// Builds the diagnostic's complete service-equivalent analysis profile.
+/// Builds the complete service-equivalent analysis profile for a source capacity.
 ///
 /// # Errors
 /// Returns a checked limit error for an invalid source capacity.
-pub(crate) fn analysis_limits(maximum_source_bytes: usize) -> Result<AnalysisLimits, LimitError> {
+pub fn analysis_limits(maximum_source_bytes: usize) -> Result<AnalysisLimits, LimitError> {
     let stream = StreamLimits::new(
         512 * 1024 * 1024,
         512 * 1024 * 1024,
@@ -32,13 +32,11 @@ pub(crate) fn analysis_limits(maximum_source_bytes: usize) -> Result<AnalysisLim
     )
 }
 
-/// Builds the diagnostic's complete service-equivalent native parser profile.
+/// Builds the complete service-equivalent native parser profile for a source capacity.
 ///
 /// # Errors
 /// Returns the native runtime's checked configuration error.
-pub(crate) fn parser_config(
-    maximum_source_bytes: usize,
-) -> Result<RuntimeConfig, RuntimeConfigError> {
+pub fn parser_config(maximum_source_bytes: usize) -> Result<RuntimeConfig, RuntimeConfigError> {
     RuntimeConfig::new(
         maximum_source_bytes,
         usize::MAX,

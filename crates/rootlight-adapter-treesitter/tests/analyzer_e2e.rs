@@ -35,8 +35,7 @@ use rootlight_ir::{
 use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot};
 use tempfile::{TempDir, tempdir_in};
 
-#[path = "../../rootlight-service/src/source_inventory_example/admission_profile.rs"]
-mod product_profile;
+use rootlight_service::source_inventory_admission_profile as product_profile;
 
 const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 const MAX_SYNTAX_NODES: usize = 16_384;

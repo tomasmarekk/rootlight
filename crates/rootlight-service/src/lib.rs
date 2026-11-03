@@ -82,9 +82,9 @@ pub use source_owner::{
 };
 #[cfg(test)]
 mod rust_binding_contract;
-#[cfg(test)]
+/// Checked service-equivalent admission profiles for diagnostics and adapter contract tests.
 #[path = "source_inventory_example/admission_profile.rs"]
-mod source_inventory_admission_profile;
+pub mod source_inventory_admission_profile;
 #[cfg(test)]
 mod syntax_admission_observation;
 #[cfg(test)]

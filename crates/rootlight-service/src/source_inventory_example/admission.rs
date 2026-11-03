@@ -24,8 +24,7 @@ use rootlight_ir::{SourceRef, SourceSpan};
 use rootlight_vfs::{RelativePath, RepositoryRoot, SourceSnapshot};
 use serde::Serialize;
 
-#[path = "admission_profile.rs"]
-mod profile;
+use rootlight_service::source_inventory_admission_profile as profile;
 
 #[derive(Debug, Serialize)]
 struct Profile {

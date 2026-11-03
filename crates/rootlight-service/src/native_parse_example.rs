@@ -29,8 +29,7 @@ use rootlight_vfs::{RelativePath, RepositoryRoot};
 use serde::{Serialize, Serializer, ser::SerializeSeq};
 use serde_json::{Value, json};
 
-#[path = "source_inventory_example/admission_profile.rs"]
-mod profile;
+use rootlight_service::source_inventory_admission_profile as profile;
 
 type DiagnosticResult<T> = Result<T, Box<dyn Error>>;
 

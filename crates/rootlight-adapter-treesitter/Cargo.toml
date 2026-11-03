@@ -134,6 +134,7 @@ tree-sitter-typescript.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+rootlight-service = { path = "../rootlight-service" }
 rootlight-vfs = { path = "../rootlight-vfs" }
 tempfile.workspace = true
 

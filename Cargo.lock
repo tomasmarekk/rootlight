@@ -1717,6 +1717,7 @@ dependencies = [
  "rootlight-encoding",
  "rootlight-ids",
  "rootlight-ir",
+ "rootlight-service",
  "rootlight-thinkscript",
  "rootlight-tree-sitter-dql",
  "rootlight-tree-sitter-nquads",
@@ -1782,6 +1783,7 @@ dependencies = [
  "tree-sitter-meson",
  "tree-sitter-modelica",
  "tree-sitter-mojo",
+ "tree-sitter-n3",
  "tree-sitter-nim",
  "tree-sitter-nix",
  "tree-sitter-nu",
@@ -1816,7 +1818,6 @@ dependencies = [
  "tree-sitter-systemverilog",
  "tree-sitter-thrift",
  "tree-sitter-toml-ng",
- "tree-sitter-n3",
  "tree-sitter-turtle",
  "tree-sitter-typescript",
  "tree-sitter-typespec",
@@ -2044,9 +2045,9 @@ dependencies = [
  "rootlight-ids",
  "rootlight-incremental",
  "rootlight-thinkscript",
- "rootlight-tree-sitter-ntriples",
  "rootlight-tree-sitter-nquads",
  "rootlight-tree-sitter-nquads-dgraph",
+ "rootlight-tree-sitter-ntriples",
  "rootlight-vfs",
  "serde",
  "serde_json",
@@ -3625,6 +3626,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-n3"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-nim"
 version = "0.6.2"
 dependencies = [
@@ -3874,7 +3883,6 @@ dependencies = [
  "tree-sitter-language",
 ]
 
-
 [[package]]
 name = "tree-sitter-swift"
 version = "0.7.3"
@@ -3902,14 +3910,6 @@ dependencies = [
 [[package]]
 name = "tree-sitter-toml-ng"
 version = "0.7.0"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
-
-[[package]]
-name = "tree-sitter-n3"
-version = "0.1.0"
 dependencies = [
  "cc",
  "tree-sitter-language",

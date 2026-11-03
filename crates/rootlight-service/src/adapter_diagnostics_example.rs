@@ -34,8 +34,7 @@ use rootlight_vfs::{RelativePath, RepositoryRoot};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-#[path = "source_inventory_example/admission_profile.rs"]
-mod profile;
+use rootlight_service::source_inventory_admission_profile as profile;
 
 const SCHEMA: &str = "rootlight-adapter-diagnostics/1";
 const MAX_INVENTORY_BYTES: u64 = 256 * 1024 * 1024;
