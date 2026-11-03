@@ -7,6 +7,8 @@
 
 mod agda;
 mod awk;
+mod codeowners;
+mod codeowners_program;
 mod elm;
 mod erlang;
 mod flux;
@@ -44,6 +46,11 @@ use rootlight_ir::{
 
 pub use agda::AgdaParseProvider;
 pub use awk::AwkParseProvider;
+pub use codeowners::CodeownersParseProvider;
+pub use codeowners_program::{
+    CodeownersDecision, CodeownersMatcher, MAX_CODEOWNERS_MATCH_PATH_BYTES,
+    MAX_CODEOWNERS_MATCH_PATH_COMPONENTS,
+};
 pub use elm::ElmParseProvider;
 pub use erlang::ErlangParseProvider;
 pub use flux::FluxParseProvider;

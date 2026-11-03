@@ -346,9 +346,9 @@ fn gitignore_native_invalidates_preceding_analyzer_and_discovery_independently()
     );
     assert_eq!(
         ANALYZER_BINARY_SEED,
-        b"rootlight.first-slice.treesitter-structural/389"
+        b"rootlight.first-slice.treesitter-structural/390"
     );
-    assert_eq!(DISCOVERY_MANIFEST_VERSION, "1.107");
+    assert_eq!(DISCOVERY_MANIFEST_VERSION, "1.108");
     assert_eq!(RESOLVER_BINARY_SEED, b"rootlight.first-slice.resolve/164");
 }
 

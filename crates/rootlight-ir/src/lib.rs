@@ -23,6 +23,7 @@ pub use aggregate_source_recovery::{
     decode_aggregate_source_recovery_envelope, new_aggregate_source_origin_envelope,
     new_aggregate_source_recovery_envelope,
 };
+mod codeowners_program;
 mod dql_query;
 mod fsharp_binding;
 mod gitignore_program;
@@ -42,6 +43,13 @@ mod source_projection;
 mod validation;
 mod vba_compilation;
 
+pub use codeowners_program::{
+    CODEOWNERS_PROGRAM_NAMESPACE, CODEOWNERS_PROGRAM_VERSION, CodeownersInvalidLine,
+    CodeownersInvalidReason, CodeownersOwner, CodeownersOwnerKind, CodeownersProgram,
+    CodeownersProgramError, CodeownersRule, MAX_CODEOWNERS_ACTIVE_LINES,
+    MAX_CODEOWNERS_PROGRAM_PAYLOAD_BYTES, MAX_CODEOWNERS_SOURCE_BYTES,
+    decode_codeowners_program_envelope, new_codeowners_program_envelope,
+};
 pub use dql_query::{
     DQL_QUERY_NAMESPACE, DQL_QUERY_VERSION, DqlBooleanOperator, DqlCallKind, DqlLiteralKind,
     DqlNode, DqlNodeKind, DqlQuery, DqlQueryError, DqlReference, MAX_DQL_QUERY_NODES,

@@ -13,6 +13,10 @@ use serde::Serialize;
 use crate::lexical::rebind_lexical_evidence_subject;
 use crate::validation::{canonicalize_ir_document_ref, validate_canonical_ir_document};
 use crate::{
+    CODEOWNERS_PROGRAM_NAMESPACE, decode_codeowners_program_envelope,
+    new_codeowners_program_envelope,
+};
+use crate::{
     CoverageRecord, DiagnosticRecord, ExtensionEnvelope, ExtensionSupport,
     FILE_IDENTITY_CLAIM_NAMESPACE, FactEvidence, FactRef, FileRecord, IrDocumentValidationError,
     IrLimits, LEXICAL_EXTENSION_NAMESPACE, LEXICAL_SUMMARY_BATCH_VERSION, NormalizedIrDocument,
@@ -1098,6 +1102,7 @@ fn require_supported_extensions_with_checkpoint(
                 | RDF_STATEMENT_NAMESPACE
                 | DQL_QUERY_NAMESPACE
                 | GITIGNORE_PROGRAM_NAMESPACE
+                | CODEOWNERS_PROGRAM_NAMESPACE
                 | GROOVY_TYPE_LOOKUP_NAMESPACE
                 | GROOVY_CALLABLE_NAMESPACE
                 | GROOVY_MEMBER_NAMESPACE
@@ -1801,6 +1806,13 @@ fn rebind_extension(
                 .and_then(|query| query.rebind(generation))
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
             new_dql_query_envelope(provenance, &query)
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)
+        }
+        CODEOWNERS_PROGRAM_NAMESPACE => {
+            let program = decode_codeowners_program_envelope(&extension)
+                .and_then(|program| program.rebind(generation))
+                .map_err(|_| NormalizedRebindError::IdentityRecipe)?;
+            new_codeowners_program_envelope(provenance, &program)
                 .map_err(|_| NormalizedRebindError::IdentityRecipe)
         }
         GITIGNORE_PROGRAM_NAMESPACE => {
@@ -4901,5 +4913,72 @@ mod tests {
             ),
             Err(NormalizedRebindError::CyclicFactReferences)
         ));
+    }
+
+    #[test]
+    fn codeowners_program_rebind_preserves_order_invalid_lines_and_source_ownership() {
+        let text = "cache/ @Owner\n!bad @user\ncache/ @Owner\nclear/\n";
+        let repository = rootlight_ids::RepositoryId::from_bytes([71; 16]);
+        let generation = GenerationId::from_bytes([72; 20]);
+        let file = FileId::from_bytes([73; 20]);
+        let owner = crate::SourceSpan::new(file, 0, text.len().try_into().unwrap()).unwrap();
+        let source = SourceRef::new(
+            repository,
+            generation,
+            owner,
+            rootlight_ids::content_hash(text.as_bytes()),
+            None,
+        );
+        let program = crate::CodeownersProgram::from_source(source, text).unwrap();
+        let provenance = FactId::from_bytes([74; 20]);
+        let envelope = new_codeowners_program_envelope(provenance, &program).unwrap();
+        let mut document = NormalizedIrDocument::empty(repository, generation);
+        document.extensions.push(envelope.clone());
+        require_supported_extensions_with_checkpoint(&document, &mut || true).unwrap();
+        let next_provenance = FactId::from_bytes([75; 20]);
+        let ids = FactIdMap {
+            entries: vec![(provenance, Some(next_provenance))],
+        };
+        let next_generation = GenerationId::from_bytes([76; 20]);
+        let rebound = rebind_extension(
+            envelope.clone(),
+            repository,
+            next_generation,
+            &ids,
+            &mut || true,
+        )
+        .unwrap();
+        let decoded = decode_codeowners_program_envelope(&rebound).unwrap();
+        assert_eq!(decoded.rules(), program.rules());
+        assert_eq!(decoded.invalid_lines(), program.invalid_lines());
+        assert_eq!(decoded.text(), text);
+        assert_eq!(decoded.source().span().file(), file);
+        assert_eq!(
+            decoded.source().content_hash(),
+            program.source().content_hash()
+        );
+        assert_eq!(decoded.source().generation(), next_generation);
+        assert_eq!(rebound.provenance, next_provenance);
+        assert_ne!(rebound.id, envelope.id);
+        let neutral = rebind_extension(
+            envelope.clone(),
+            repository,
+            GENERATION_NEUTRAL_ID,
+            &ids,
+            &mut || true,
+        )
+        .unwrap();
+        assert_eq!(
+            decode_codeowners_program_envelope(&neutral)
+                .unwrap()
+                .source()
+                .generation(),
+            GENERATION_NEUTRAL_ID
+        );
+        let mut forged = envelope;
+        forged.payload.push(' ');
+        assert!(
+            rebind_extension(forged, repository, next_generation, &ids, &mut || true,).is_err()
+        );
     }
 }

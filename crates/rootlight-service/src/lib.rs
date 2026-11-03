@@ -149,11 +149,11 @@ use rootlight_adapter_treesitter::{
     TreeSitterAnalyzer, TreeSitterProvider, TreeSitterStructuralArtifact,
 };
 use rootlight_adapters::{
-    AgdaParseProvider, AwkParseProvider, ElmParseProvider, ErlangParseProvider, FluxParseProvider,
-    GitignoreParseProvider, IniParseProvider, LessParseProvider, MAX_PROJECT_CONTEXT_BYTES,
-    MakeParseProvider, PrologParseProvider, PwctParseProvider, RuntimeTraceImportRequest,
-    SassParseProvider, ScssParseProvider, TclParseProvider, ThinkScriptParseProvider,
-    import_runtime_trace,
+    AgdaParseProvider, AwkParseProvider, CodeownersParseProvider, ElmParseProvider,
+    ErlangParseProvider, FluxParseProvider, GitignoreParseProvider, IniParseProvider,
+    LessParseProvider, MAX_PROJECT_CONTEXT_BYTES, MakeParseProvider, PrologParseProvider,
+    PwctParseProvider, RuntimeTraceImportRequest, SassParseProvider, ScssParseProvider,
+    TclParseProvider, ThinkScriptParseProvider, import_runtime_trace,
 };
 pub use rootlight_adapters::{
     PROJECT_MODULE_RESOLUTION_MARKER, PROJECT_SYNTAX_FACT_LIMIT_DIAGNOSTIC,
@@ -1238,7 +1238,7 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/389";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/390";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/164";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
 const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/16";
@@ -6863,6 +6863,20 @@ impl StructuralPreflight for GitignoreParseProvider {
     }
 }
 
+impl StructuralPreflight for CodeownersParseProvider {
+    fn supports_fresh_source_preservation(&self) -> bool {
+        true
+    }
+
+    fn required_syntax_fact_count(
+        &self,
+        request: &rootlight_adapter_sdk::ParseRequest<'_>,
+        cancellation: &Cancellation,
+    ) -> Result<usize, AdapterError> {
+        CodeownersParseProvider::required_syntax_fact_count(self, request, cancellation)
+    }
+}
+
 impl StructuralPreflight for PwctParseProvider {
     fn supports_fresh_source_preservation(&self) -> bool {
         true
@@ -7991,6 +8005,10 @@ impl FirstSliceService {
             GitignoreParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
                 .map_err(|_| FirstSliceError::Adapter)?,
         );
+        let codeowners_parser = Arc::new(
+            CodeownersParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
+                .map_err(|_| FirstSliceError::Adapter)?,
+        );
         let pwct_parser = Arc::new(
             PwctParseProvider::new(maximum_source_bytes, MAX_SYNTAX_NODES)
                 .map_err(|_| FirstSliceError::Adapter)?,
@@ -8291,6 +8309,31 @@ impl FirstSliceService {
                 .insert(
                     "gitignore".to_owned(),
                     gitignore_parser as Arc<dyn StructuralPreflight>,
+                )
+                .is_some()
+        {
+            return Err(FirstSliceError::Adapter);
+        }
+        let codeowners_analyzer = TreeSitterAnalyzer::new(
+            Arc::clone(&codeowners_parser) as Arc<dyn ParseProvider>,
+            ProducerIdentity::new(
+                "rootlight-first-slice-codeowners-native",
+                "1.0",
+                config.hash(),
+            )
+            .map_err(|_| FirstSliceError::Adapter)?,
+            LanguageId::new("codeowners").map_err(|_| FirstSliceError::Adapter)?,
+            "codeowners-native-structural-1",
+            CodeownersParseProvider::binary_digest(),
+        )
+        .map_err(|_| FirstSliceError::Adapter)?;
+        if analyzers
+            .insert("codeowners".to_owned(), codeowners_analyzer)
+            .is_some()
+            || structural_parsers
+                .insert(
+                    "codeowners".to_owned(),
+                    codeowners_parser as Arc<dyn StructuralPreflight>,
                 )
                 .is_some()
         {
@@ -27591,6 +27634,7 @@ mod tests {
     mod c_preprocessor;
     mod cmake;
     mod cmake_patch;
+    mod codeowners_native;
     mod coffeescript_source_preservation;
     mod coq_source;
     mod cpp_include_resolution;

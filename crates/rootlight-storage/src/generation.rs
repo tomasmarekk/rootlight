@@ -2140,6 +2140,16 @@ fn verify_snapshot_identities(
                     .check()
                     .map_err(IdentityVerificationError::Control)?;
             }
+            rootlight_ir::CODEOWNERS_PROGRAM_NAMESPACE => {
+                rootlight_ir::decode_codeowners_program_envelope(envelope).map_err(|_| {
+                    IdentityVerificationError::IdentityMismatch(
+                        IdentityMismatchComponent::ClaimEnvelope,
+                    )
+                })?;
+                context
+                    .check()
+                    .map_err(IdentityVerificationError::Control)?;
+            }
             rootlight_ir::GITIGNORE_PROGRAM_NAMESPACE => {
                 rootlight_ir::decode_gitignore_program_envelope(envelope).map_err(|_| {
                     IdentityVerificationError::IdentityMismatch(
@@ -4516,6 +4526,85 @@ mod tests {
             ),
             Err(IdentityVerificationError::ManifestMismatch)
         );
+    }
+
+    #[test]
+    fn codeowners_program_identity_is_verified_before_snapshot_admission() {
+        let text = "* @owner\n/apps/clear\n!bad @ignored\n";
+        let (metadata, mut document, catalog) =
+            file_only_generation_with_anchor(true, text.as_bytes());
+        document.files[0].language = "codeowners".to_owned();
+        let file = &document.files[0];
+        let program = rootlight_ir::CodeownersProgram::from_source(
+            file.evidence.source.clone().unwrap(),
+            text,
+        )
+        .unwrap();
+        let envelope =
+            rootlight_ir::new_codeowners_program_envelope(file.provenance, &program).unwrap();
+        document.extensions.push(envelope.clone());
+        let cancellation = Cancellation::new();
+        let context = GenerationContext::new(&cancellation, GenerationBudget::default());
+        let verified = IdentityVerifiedGeneration::verify_with_source_files(
+            metadata,
+            document.clone(),
+            catalog.clone(),
+            &IrLimits::default(),
+            &ExtensionSupport::default(),
+            &context,
+        )
+        .unwrap();
+        assert!(verified.document().extensions.contains(&envelope));
+        assert_eq!(
+            IdentityVerifiedGeneration::verify_snapshot(verified.snapshot().clone(), &context)
+                .unwrap(),
+            verified
+        );
+        verified.generation_neutral_digests(&context).unwrap();
+        for fault in ["noncanonical", "version", "rehash_forged_owner_kind"] {
+            let mut changed = document.clone();
+            let item = changed
+                .extensions
+                .iter_mut()
+                .find(|item| item.id == envelope.id)
+                .unwrap();
+            match fault {
+                "noncanonical" => item.payload.push(' '),
+                "version" => item.version = "2".to_owned(),
+                _ => {
+                    let mut payload: serde_json::Value =
+                        serde_json::from_str(&item.payload).unwrap();
+                    payload["rules"][0]["owners"][0]["kind"] = "team".into();
+                    item.payload = serde_json::to_string(&payload).unwrap();
+                }
+            }
+            let identity = serde_json::to_vec(&(
+                item.namespace.as_str(),
+                item.version.as_str(),
+                item.evidence.source.as_ref().unwrap(),
+                item.provenance,
+                content_hash(item.payload.as_bytes()),
+                &item.evidence.derivation,
+            ))
+            .unwrap();
+            item.id = rootlight_ids::derive_fact("rootlight.codeowners_program/v1", &identity).id();
+            assert!(
+                matches!(
+                    IdentityVerifiedGeneration::verify_with_source_files(
+                        metadata,
+                        changed,
+                        catalog.clone(),
+                        &IrLimits::default(),
+                        &ExtensionSupport::default(),
+                        &context,
+                    ),
+                    Err(IdentityVerificationError::IdentityMismatch(
+                        IdentityMismatchComponent::ClaimEnvelope
+                    ) | IdentityVerificationError::InvalidGeneration)
+                ),
+                "{fault}"
+            );
+        }
     }
 
     #[test]

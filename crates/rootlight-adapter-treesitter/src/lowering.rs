@@ -22,6 +22,7 @@ mod chapel_calls;
 mod chapel_formals;
 mod clojure;
 mod cmake;
+mod codeowners;
 mod coffeescript;
 mod coq;
 mod coq_written;
@@ -745,6 +746,7 @@ impl TreeSitterAnalyzer {
                     .max(lowered.rdf_modeled_peak)
                     .max(lowered.dql_modeled_peak)
                     .max(lowered.gitignore_modeled_peak)
+                    .max(lowered.codeowners_modeled_peak)
             }),
             usage,
         );
@@ -979,6 +981,7 @@ fn required_syntax_fact_count_from_output(
             || ntriples::required(fact)
             || dql::required(fact)
             || gitignore::required(fact)
+            || codeowners::required(fact)
             || dockerfile::required(fact)
             || java_local_receivers::required(fact)
             || cpp_const_formals::required(fact)
@@ -1384,6 +1387,7 @@ struct LoweringBudget {
     ntriples: ntriples::Plan,
     dql: dql::Plan,
     gitignore: gitignore::Plan,
+    codeowners: codeowners::Plan,
 }
 
 fn preflight_lowering_limits(
@@ -1456,6 +1460,7 @@ fn preflight_lowering_limits(
     let ntriples = ntriples::Plan::new(request, parse_output, cancellation)?;
     let dql = dql::Plan::new(request, parse_output, cancellation)?;
     let gitignore = gitignore::Plan::new(request, parse_output, cancellation)?;
+    let codeowners = codeowners::Plan::new(request, parse_output, cancellation)?;
     let mut entity_candidates = 0_usize;
     let mut occurrence_candidates = 0_usize;
     let mut lexical_relation_candidates = 0_usize;
@@ -1470,8 +1475,10 @@ fn preflight_lowering_limits(
     ntriples.account_strings(&mut string_bytes, limits)?;
     dql.account_strings(&mut string_bytes, limits)?;
     gitignore.account_strings(&mut string_bytes, limits)?;
+    codeowners.account_strings(&mut string_bytes, limits)?;
     skipped_candidates = checked_add(skipped_candidates, usize::from(dql.gap.is_some()))?;
     skipped_candidates = checked_add(skipped_candidates, usize::from(gitignore.gap.is_some()))?;
+    skipped_candidates = checked_add(skipped_candidates, usize::from(codeowners.gap.is_some()))?;
     skipped_candidates = checked_add(skipped_candidates, ntriples.gaps.len())?;
     for gap in &ntriples.gaps {
         account_string(&mut string_bytes, gap.detail.len(), limits)?;
@@ -2341,7 +2348,7 @@ fn preflight_lowering_limits(
         checked_add(1, entity_candidates)?,
         checked_add(
             checked_add(vba_compilation_candidates, ntriples.statements.len())?,
-            checked_add(dql.len(), gitignore.len())?,
+            checked_add(checked_add(dql.len(), gitignore.len())?, codeowners.len())?,
         )?,
     )?;
     require_resource_limit(
@@ -2404,7 +2411,7 @@ fn preflight_lowering_limits(
             checked_add(2, diagnostic_derivations)?,
             checked_add(
                 checked_add(vba_compilation_candidates, ntriples.statements.len())?,
-                checked_add(dql.len(), gitignore.len())?,
+                checked_add(checked_add(dql.len(), gitignore.len())?, codeowners.len())?,
             )?,
         )?,
         field_relation_derivations,
@@ -2421,6 +2428,7 @@ fn preflight_lowering_limits(
         ntriples,
         dql,
         gitignore,
+        codeowners,
     })
 }
 
@@ -2521,6 +2529,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
         let mut ntriples = std::mem::take(&mut budget.ntriples);
         let mut dql = std::mem::take(&mut budget.dql);
         let mut gitignore = std::mem::take(&mut budget.gitignore);
+        let mut codeowners = std::mem::take(&mut budget.codeowners);
         if self.request.language().as_str() == "markdown" {
             self.classic_fences = classic_fence_spans(self.coordinates.facts(), cancellation)?;
         }
@@ -4685,6 +4694,18 @@ impl<'context, 'source> Lowering<'context, 'source> {
             )?;
             if extensions.insert(envelope.id, envelope).is_some() {
                 return Err(provider_failure("gitignore-program-identity-collision"));
+            }
+        }
+
+        if let Some(envelope) = codeowners.envelope(provenance_id)? {
+            ensure_extension_budget(
+                &envelope,
+                extensions.len(),
+                &mut extension_bytes,
+                self.request.limits().ir(),
+            )?;
+            if extensions.insert(envelope.id, envelope).is_some() {
+                return Err(provider_failure("codeowners-program-identity-collision"));
             }
         }
 
@@ -7998,6 +8019,17 @@ impl<'context, 'source> Lowering<'context, 'source> {
             )?;
             insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
         }
+        if let Some(gap) = &codeowners.gap {
+            let region = skipped_region(
+                self.full_source,
+                gap.span,
+                FactDomain::Extensions,
+                SkippedRegionReason::UnsupportedConstruct,
+                gap.detail,
+                provenance_id,
+            )?;
+            insert_skipped_region(&mut skipped, region, skipped_limit, cancellation)?;
+        }
         for gap in &ntriples.gaps {
             cancellation.check()?;
             let region = skipped_region(
@@ -8103,6 +8135,7 @@ impl<'context, 'source> Lowering<'context, 'source> {
             rdf_modeled_peak: ntriples.modeled_peak,
             dql_modeled_peak: dql.modeled_peak,
             gitignore_modeled_peak: gitignore.modeled_peak,
+            codeowners_modeled_peak: codeowners.modeled_peak,
             records,
             coverage_status,
             skipped_regions: stats.skipped_regions,
@@ -10637,6 +10670,7 @@ struct LoweredOutput {
     rdf_modeled_peak: usize,
     dql_modeled_peak: usize,
     gitignore_modeled_peak: usize,
+    codeowners_modeled_peak: usize,
     records: Vec<IrRecord>,
     coverage_status: CoverageStatus,
     skipped_regions: usize,
@@ -13488,7 +13522,9 @@ fn diagnostic_skip_reason(code: &str) -> SkippedRegionReason {
 }
 
 fn diagnostic_gap_domains(code: &str) -> &'static [FactDomain] {
-    if matches!(
+    if code.starts_with("codeowners-") {
+        &[FactDomain::Diagnostics, FactDomain::Extensions]
+    } else if matches!(
         code,
         "c-preprocessor-replacement-not-analyzed" | "cpp-preprocessor-replacement-not-analyzed"
     ) {

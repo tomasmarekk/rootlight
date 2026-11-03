@@ -95,7 +95,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.107";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.108";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -2951,6 +2951,14 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         analyzers: &["treesitter"],
     },
     LanguageCapability {
+        language: "codeowners",
+        suffixes: &[],
+        aliases: &[],
+        detectors: &["filename", "configuration"],
+        maximum_tier: "tier_d",
+        analyzers: &["native"],
+    },
+    LanguageCapability {
         language: "gitignore",
         suffixes: &[".gitignore"],
         aliases: &["git-ignore"],
@@ -3637,12 +3645,22 @@ fn tt_erb_content_hint(content: &[u8], prefix_truncated: bool) -> bool {
 
 /// Returns the source language of an exact conventional basename.
 ///
-/// Matching is ASCII-case-insensitive and accepts either path separator. Backup
-/// suffixes and directory names do not match; no file contents are inspected.
+/// Most conventions are ASCII-case-insensitive and accept either separator.
+/// CODEOWNERS uses exact casing at the repository root, `.github` or `docs`.
+/// Backup suffixes and directory names do not match; contents are not inspected.
 #[must_use]
 pub fn filename_language(path: &str) -> Option<&'static str> {
     let name = path.rsplit(['/', '\\']).next()?;
-    if name.eq_ignore_ascii_case("Dockerfile") {
+    if matches!(
+        path,
+        "CODEOWNERS"
+            | ".github/CODEOWNERS"
+            | "docs/CODEOWNERS"
+            | ".github\\CODEOWNERS"
+            | "docs\\CODEOWNERS"
+    ) {
+        Some("codeowners")
+    } else if name.eq_ignore_ascii_case("Dockerfile") {
         Some("dockerfile")
     } else if name == "meson.build" {
         Some("meson")
@@ -8132,6 +8150,41 @@ max_source_file_bytes = 2097152
             assert_eq!(capability.analyzers, ["native"]);
             assert_eq!(capability.maximum_tier, "tier_d");
         }
+    }
+
+    #[test]
+    fn codeowners_routes_only_exact_repository_conventions() {
+        for path in [
+            "CODEOWNERS",
+            ".github/CODEOWNERS",
+            "docs/CODEOWNERS",
+            ".github\\CODEOWNERS",
+            "docs\\CODEOWNERS",
+        ] {
+            assert_eq!(filename_language(path), Some("codeowners"), "{path}");
+            assert_eq!(extension_language(path), None, "{path}");
+        }
+        for path in [
+            "codeowners",
+            "Codeowners",
+            "CODEOWNERS.txt",
+            "CODEOWNERS.bak",
+            "myCODEOWNERS",
+            "nested/CODEOWNERS",
+            "nested/.github/CODEOWNERS",
+            "Docs/CODEOWNERS",
+            ".GITHUB/CODEOWNERS",
+            "CODEOWNERS/file.rs",
+        ] {
+            assert_ne!(filename_language(path), Some("codeowners"), "{path}");
+        }
+        assert_eq!(canonical_language("codeowners"), Some("codeowners"));
+        let capability = LANGUAGE_CAPABILITIES
+            .iter()
+            .find(|entry| entry.language == "codeowners")
+            .unwrap();
+        assert!(capability.suffixes.is_empty());
+        assert_eq!(capability.analyzers, ["native"]);
     }
 
     #[test]
