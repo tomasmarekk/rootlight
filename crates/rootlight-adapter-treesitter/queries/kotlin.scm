@@ -3,6 +3,8 @@
 
 (source_file) @root
 (package_header) @module
+(source_file
+  (package_header (qualified_identifier) @definition))
 
 [
   (class_declaration)

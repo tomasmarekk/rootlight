@@ -245,6 +245,84 @@ fn analyze_input(
 }
 
 #[test]
+fn kotlin_package_keeps_the_full_qualified_definition_and_exact_source() {
+    let raw = b"// package fake.comment\r\npackage com.facebook.react.model\r\nclass Model\r\nval text = \"package fake.string\"\r\n";
+    let (parsed, document) = analyze(raw);
+    assert!(parsed.diagnostics().is_empty());
+    let package = definition(
+        &document,
+        raw,
+        33,
+        57,
+        "com.facebook.react.model",
+        EntityKind::Module,
+    );
+    let site = document
+        .occurrences
+        .iter()
+        .find(|site| {
+            site.role == OccurrenceRole::Definition
+                && site.target == OccurrenceTarget::Resolved { symbol: package }
+        })
+        .unwrap();
+    assert_eq!(site.source.span().file(), document.files[0].id);
+    assert_eq!(site.source.generation(), document.generation);
+    assert_eq!(site.source.content_hash(), content_hash(raw));
+    assert!(!document.entities.iter().any(|entity| matches!(
+        entity.canonical_name.as_str(),
+        "com" | "facebook" | "react" | "model" | "fake.comment" | "fake.string"
+    )));
+    assert!(!document.skipped_regions.iter().any(|gap| {
+        gap.detail == "declaration-name-unavailable"
+            && gap.source.span().start_byte() == 25
+            && gap.source.span().end_byte() == 57
+    }));
+}
+
+#[test]
+fn kotlin_package_does_not_define_names_from_malformed_headers_or_nested_contexts() {
+    for raw in [
+        b"package\n".as_slice(),
+        b"package com..facebook\nclass Model\n".as_slice(),
+        b"package com.\nclass Model\n".as_slice(),
+        b"package .com\nclass Model\n".as_slice(),
+        b"class Model { package fake.nested }\n".as_slice(),
+    ] {
+        let (parsed, document) = analyze(raw);
+        assert!(
+            !parsed.diagnostics().is_empty()
+                || document
+                    .skipped_regions
+                    .iter()
+                    .any(|gap| gap.detail == "declaration-name-unavailable"),
+            "malformed header must retain recovery or a naming refusal: {raw:?}"
+        );
+        assert!(
+            !document
+                .entities
+                .iter()
+                .any(|entity| entity.kind == EntityKind::Module),
+            "malformed package input {raw:?}"
+        );
+    }
+}
+
+#[test]
+fn kotlin_package_keeps_a_complete_header_before_unrelated_recovery() {
+    let raw = b"package com.facebook.react.model\nfun broken(\n";
+    let (parsed, document) = analyze(raw);
+    assert!(!parsed.diagnostics().is_empty());
+    definition(
+        &document,
+        raw,
+        8,
+        32,
+        "com.facebook.react.model",
+        EntityKind::Module,
+    );
+}
+
+#[test]
 fn original_kotlin_class_and_override_method_keep_names_and_containment() {
     assert_eq!(ORIGINAL.len(), 835);
     assert_eq!(&ORIGINAL[390..411], b"SlideInRightAnimation");

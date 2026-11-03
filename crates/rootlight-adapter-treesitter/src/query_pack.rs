@@ -3016,6 +3016,23 @@ impl QueryPack {
                         continue;
                     }
                 }
+                // Package identity needs a complete local header, even when later
+                // source-file recovery leaves that header's identity intact.
+                if input.family == GrammarFamily::Kotlin
+                    && role == StructuralRole::Definition
+                    && capture.node.kind() == "qualified_identifier"
+                    && (capture.node.is_missing()
+                        || !capture.node.parent().is_some_and(|header| {
+                            header.kind() == "package_header"
+                                && !header.is_missing()
+                                && !header.has_error()
+                                && header
+                                    .parent()
+                                    .is_some_and(|owner| owner.kind() == "source_file")
+                        }))
+                {
+                    continue;
+                }
                 if input.family == GrammarFamily::Capnp
                     && !capnp::retain_capture(capture.node, role, input.source, input.cancellation)?
                 {
