@@ -1,0 +1,61 @@
+{
+  "schema": "rootlight.meson-static-generation/1",
+  "generator": {
+    "name": "tree-sitter-cli",
+    "version": "0.26.8",
+    "binary_sha256": "a61249a07c4a6d01d0bbbb5b7c058e29e12c119ef7fb5bede0b7fd916a7c56f0",
+    "official_archive": "tree-sitter-cli-windows-x64.zip",
+    "official_archive_sha256": "8d8b8b0dc0a94a2d757af227d65970e349725d445375d1eb1641595d5c691b25"
+  },
+  "command": [
+    "tree-sitter",
+    "generate",
+    "--abi",
+    "14",
+    "--js-runtime",
+    "native",
+    "grammar.js"
+  ],
+  "abi": 14,
+  "preparation_only": true,
+  "build_time_generation": false,
+  "inputs": [
+    {
+      "path": "grammar.js",
+      "bytes": 7573,
+      "sha256": "a43892bd54c18a42e76ea5d5f76d8826c9efaa900d8a5279eae66dfa44501a7d"
+    }
+  ],
+  "generated": [
+    {
+      "path": "src/grammar.json",
+      "bytes": 29080,
+      "sha256": "886609c3e4c3adb09f1f75293ded97329ade72f7eeb0baeddce1b7f25bcd5c34"
+    },
+    {
+      "path": "src/node-types.json",
+      "bytes": 17281,
+      "sha256": "ead3888737e749e4cc72a2dadd40c12ce389bf886da5c8e3ec75e6a1f0c5610a"
+    },
+    {
+      "path": "src/parser.c",
+      "bytes": 247423,
+      "sha256": "6b1ed625bbf34c7db7f1161ef68fd82786dc4e2b3a9475445266a2e375334d7e"
+    },
+    {
+      "path": "src/tree_sitter/alloc.h",
+      "bytes": 985,
+      "sha256": "b29c1c9fb7cc82f58c84b376df1297d6e2737a1d655fd356db0859e3c29c2fea"
+    },
+    {
+      "path": "src/tree_sitter/array.h",
+      "bytes": 13269,
+      "sha256": "31e60a1bff6f715afacce03b5b70efe42b58371b4f9595dd4af52a577ff9608c"
+    },
+    {
+      "path": "src/tree_sitter/parser.h",
+      "bytes": 7624,
+      "sha256": "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2"
+    }
+  ]
+}

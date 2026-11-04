@@ -140,10 +140,10 @@ fn original_full_file_keeps_two_exact_variables_and_the_foreach_iterable_referen
 }
 
 #[test]
-fn original_recovery_and_all_three_partial_domains_remain_explicit() {
+fn original_valid_lists_and_iterables_parse_without_claiming_project_evaluation() {
     let result = output(ORIGINAL, EncodingId::utf8());
     assert!(
-        result
+        !result
             .document()
             .skipped_regions
             .iter()
@@ -156,34 +156,13 @@ fn original_recovery_and_all_three_partial_domains_remain_explicit() {
     ] {
         assert!(result.document().skipped_regions.iter().any(|gap|gap.domain==domain&&gap.reason==SkippedRegionReason::UnsupportedConstruct&&gap.detail=="meson-clean-written-top-level-bindings-and-adjacent-iterables-only-project-evaluation-and-recovered-regions-unavailable"));
     }
-    for (start, end) in [
-        (48, 49),
-        (503, 504),
-        (591, 616),
-        (706, 731),
-        (906, 907),
-        (913, 914),
-        (1078, 1079),
-        (1091, 1092),
-    ] {
-        for domain in [
-            FactDomain::Entities,
-            FactDomain::Occurrences,
-            FactDomain::Relations,
-        ] {
-            assert!(
-                result
-                    .document()
-                    .skipped_regions
-                    .iter()
-                    .any(|gap| gap.domain == domain
-                        && gap.reason == SkippedRegionReason::ParseError
-                        && gap.detail == "meson-native-recovered-syntax-region-not-certified"
-                        && gap.source.span().start_byte() == start
-                        && gap.source.span().end_byte() == end)
-            );
-        }
-    }
+    assert!(
+        !result
+            .document()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "syntax-error-recovery" })
+    );
     assert_eq!(
         ORIGINAL
             .windows(5)
@@ -193,6 +172,66 @@ fn original_recovery_and_all_three_partial_domains_remain_explicit() {
         vec![516, 536, 557, 1086]
     );
     assert!(!ORIGINAL.windows(b"__rootlight_absent_d55ee6fd754af45ab2bd76778d404276df7e00db1a03af6b26321cd266131c41__".len()).any(|value|value==b"__rootlight_absent_d55ee6fd754af45ab2bd76778d404276df7e00db1a03af6b26321cd266131c41__"));
+}
+
+#[test]
+fn trailing_comma_lists_and_expression_iterables_preserve_finite_binding_authority() {
+    for bytes in [
+        b"items = [1,2,]\nforeach item : items + [3,]\nendforeach\n".as_ref(),
+        b"items = [[1,],]\nforeach item : items[0]\nendforeach\n".as_ref(),
+        b"items = []\nforeach item : get_option('items',)\nendforeach\n".as_ref(),
+        b"foreach item : [1,2,]\nendforeach\n".as_ref(),
+        b"foreach key, value : {'name':1,}\nendforeach\n".as_ref(),
+        b"consume(1, label: [2,],)\n".as_ref(),
+        b"consume(label: [2,],)\n".as_ref(),
+    ] {
+        let result = output(bytes, EncodingId::utf8());
+        assert!(
+            !result
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| { gap.reason == SkippedRegionReason::ParseError }),
+            "{}",
+            String::from_utf8_lossy(bytes),
+        );
+        assert!(!result.document().occurrences.iter().any(|site| {
+            site.role == OccurrenceRole::Reference
+                && matches!(site.target, OccurrenceTarget::Resolved { .. })
+        }));
+        assert!(!result.document().relations.iter().any(|relation| {
+            matches!(
+                relation.predicate,
+                RelationPredicate::Calls | RelationPredicate::RefersTo
+            )
+        }));
+    }
+}
+
+#[test]
+fn malformed_lists_and_missing_iterables_keep_explicit_recovery() {
+    for bytes in [
+        b"items = [1,,2]\n".as_ref(),
+        b"items = {'name':1,,}\n".as_ref(),
+        b"consume(1,,2)\n".as_ref(),
+        b"consume(1,, label: 2)\n".as_ref(),
+        b"foreach item :\nendforeach\n".as_ref(),
+    ] {
+        let result = output(bytes, EncodingId::utf8());
+        for domain in [
+            FactDomain::Entities,
+            FactDomain::Occurrences,
+            FactDomain::Relations,
+        ] {
+            assert!(
+                result.document().skipped_regions.iter().any(|gap| {
+                    gap.domain == domain && gap.reason == SkippedRegionReason::ParseError
+                }),
+                "{}: {domain:?}",
+                String::from_utf8_lossy(bytes),
+            );
+        }
+    }
 }
 
 #[test]

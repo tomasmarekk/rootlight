@@ -317,6 +317,7 @@ crates/rootlight-adapter-treesitter/tests/fixtures/gdscript/GroupCel.gd -text
 crates/rootlight-adapter-treesitter/tests/fixtures/gdscript/LICENSE.txt -text
 
 /third_party/tree-sitter-meson-1.0.0/** -text
+/third_party/tree-sitter-meson-1.0.0/patches/*.patch whitespace=-blank-at-eol
 /crates/rootlight-adapter-treesitter/tests/fixtures/meson/** -text
 /third_party/tree-sitter-dockerfile-0.2.0/** -text
 

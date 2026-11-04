@@ -1,0 +1,73 @@
+--- a/grammar.js
++++ b/grammar.js
+@@ -1,3 +1,6 @@
++// Active Meson grammar; the exact pinned source remains under upstream/.
++// Foreach expressions retain direct iterable children so lexical binding proofs
++// can continue to distinguish bare names from unevaluated calls and other values.
+ module.exports = grammar({
+   name: "meson",
+ 
+@@ -10,7 +13,7 @@
+ 
+   inline: ($) => [],
+ 
+-  conflicts: ($) => [[$._positional_arguments]],
++  conflicts: ($) => [[$._positional_arguments], [$._keyword_arguments]],
+ 
+   precedences: (_$) => [
+     ["multiply", "add", "compare", "equality", "logical_and", "logical_or"],
+@@ -101,7 +104,8 @@
+ 
+     array_literal: ($) => seq("[", optional($._expression_list), "]"),
+ 
+-    _expression_list: ($) => seq($.expression, repeat(seq(",", $.expression))),
++    _expression_list: ($) =>
++      seq($.expression, repeat(seq(",", $.expression)), optional(",")),
+ 
+     dictionary_literal: ($) => seq("{", optional($._key_value_list), "}"),
+ 
+@@ -109,7 +113,7 @@
+       seq(field("key", $.expression), ":", field("value", $.expression)),
+ 
+     _key_value_list: ($) =>
+-      seq($.key_value_item, repeat(seq(",", $.key_value_item))),
++      seq($.key_value_item, repeat(seq(",", $.key_value_item)), optional(",")),
+ 
+     _literal: ($) =>
+       choice(
+@@ -138,7 +142,9 @@
+ 
+     expression_statement: ($) => $.expression,
+ 
+-    expression: ($) =>
++    expression: ($) => $._expression,
++
++    _expression: ($) =>
+       choice(
+         $.conditional_expression,
+         $.logical_or_expression,
+@@ -225,9 +231,12 @@
+       ),
+ 
+     _argument_list: ($) =>
+-      choice(
+-        seq($._positional_arguments, optional(seq(",", $._keyword_arguments))),
+-        $._keyword_arguments
++      seq(
++        choice(
++          seq($._positional_arguments, optional(seq(",", $._keyword_arguments))),
++          $._keyword_arguments
++        ),
++        optional(",")
+       ),
+ 
+     _positional_arguments: ($) => seq($.argument, repeat(seq(",", $.argument))),
+@@ -268,7 +277,7 @@
+         $.foreach,
+         $.identifier_list,
+         ":",
+-        $.identifier,
++        $._expression,
+         "\n",
+         optional($.statement_list),
+         $.endforeach

@@ -423,11 +423,11 @@ mod tests {
     }
 
     #[test]
-    fn original_recovered_file_keeps_only_clean_native_assignment_and_iterable_authority() {
+    fn original_valid_file_keeps_only_clean_native_assignment_and_iterable_authority() {
         let source = include_bytes!("../../tests/fixtures/meson/meson.build");
         let parsed = tree(source);
         assert_eq!(source.len(), 1095);
-        assert!(parsed.root_node().has_error());
+        assert!(!parsed.root_node().has_error());
         let site = parsed
             .root_node()
             .descendant_for_byte_range(557, 562)

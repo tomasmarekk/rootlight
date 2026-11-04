@@ -933,8 +933,8 @@ const fn identity_for(family: GrammarFamily) -> GrammarIdentity {
         GrammarFamily::Meson => GrammarIdentity {
             language_id: "meson",
             grammar_version: "1.0.0",
-            source_package_sha256: "fae5f812e4faad95f49efc30ea1be08e694642405f5ee3eb7bcd4a4f10ee8b9b",
-            parser_sha256: "b943376d83dcb78f1ca2f6060d00234d61009e446f505f0a125574f492b3577d",
+            source_package_sha256: "ca6c6f0707c6fd979f97cad725207f13d27e254d33a6176c01b8ad50f060535e",
+            parser_sha256: "6b1ed625bbf34c7db7f1161ef68fd82786dc4e2b3a9475445266a2e375334d7e",
             scanner_sha256: None,
         },
         GrammarFamily::Gdscript => GrammarIdentity {

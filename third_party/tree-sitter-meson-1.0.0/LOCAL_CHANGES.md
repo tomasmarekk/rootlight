@@ -1,17 +1,27 @@
 # Local Meson parser integration
 
 All 33 regular Git blobs from staysail/tree-sitter-meson commit
-1a497eecfb1b840ab12caf28f0ef45d4a5e26d28 are retained
-under upstream with exact bytes (see SOURCE-PROVENANCE.json for the authoritative
-commit and UPSTREAM-INVENTORY.json for every blob). Upstream parser tables and
-grammar are unchanged. Root attributes apply to the retained sources; upstream
-Git attribute metadata is renamed and inert.
+1a497eecfb1b840ab12caf28f0ef45d4a5e26d28 remain byte-exact under `upstream/`.
+`SOURCE-PROVENANCE.json` records the source pin; `UPSTREAM-INVENTORY.json`
+records every original blob. Upstream Git attribute metadata is renamed and inert.
+
+The active `grammar.js` derives from that retained input through
+`patches/lists-and-iterables.patch`. It admits trailing commas in nonempty arrays,
+dictionaries and function argument lists, and expression-valued foreach iterables.
+A single trailing-comma boundary for mixed arguments does not admit empty or
+repeated arguments. The hidden expression rule preserves direct bare-name iterable
+children so lexical binding proofs can distinguish them from unevaluated values.
+
+`GENERATION.json` binds the reviewed grammar and ABI14 parser, node metadata and
+headers to the retained Tree-sitter CLI 0.26.8 maintainer tool. Generation occurs
+only during source preparation. The active generated tables live under `src/`;
+the original upstream tables remain unchanged for provenance and comparison.
 
 The operational Rust wrapper uses the existing LanguageFn and cc dependencies.
-The retained old Rust binding and its Tree-sitter 0.20 requirement are inert;
-they are not workspace members or build inputs. Compilation reads the local
-generated parser only. No scanner, generator or network access is required.
+The old upstream Rust binding and its Tree-sitter 0.20 requirement remain inert.
+Compilation reads reviewed local C11 inputs only: no scanner, generator,
+JavaScript runtime, upstream lifecycle scripts or network acquisition is required.
 
-The grammar recovers valid Meson syntax outside its older supported subset.
-Recovery must remain observable; native parsing does not prove project execution,
-dynamic name binding, dependency discovery or complete Meson language support.
+Recovery remains observable for malformed or unsupported syntax. Native parsing
+does not prove project execution, dynamic name binding, dependency discovery or
+complete structural and semantic Meson coverage.
