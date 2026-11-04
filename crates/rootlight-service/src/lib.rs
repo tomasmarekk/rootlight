@@ -1238,10 +1238,10 @@ const PROJECT_FACTS_TRUNCATED_CODE: &str = "project-adapter-facts-truncated";
 const PROJECT_FACTS_TRUNCATED_MESSAGE: &str =
     "additional project semantic facts were omitted by aggregate resource limits";
 const AGGREGATE_DIAGNOSTICS_TRUNCATED_CODE: &str = "aggregate-diagnostics-truncated";
-const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/392";
+const ANALYZER_BINARY_SEED: &[u8] = b"rootlight.first-slice.treesitter-structural/393";
 const RESOLVER_BINARY_SEED: &[u8] = b"rootlight.first-slice.resolve/164";
 const INCREMENTAL_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.incremental-provider/1";
-const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/16";
+const LANGUAGE_DISPOSITION_PROVIDER_SEED: &[u8] = b"rootlight.first-slice.language-disposition/17";
 const SOURCE_FILE_FALLBACK_PROVIDER_SEED: &[u8] = b"rootlight.source-file-fallback/6";
 const INCREMENTAL_UNIT_SEED: &str = "rootlight.first-slice.repository-unit";
 const INCREMENTAL_FILE_UNIT_SEED: &str = "rootlight.first-slice.file-unit";
@@ -20057,6 +20057,10 @@ fn source_language_route<'a>(
         let language = detected_source_language(input)?;
         return analyzers.contains_key(language).then_some(language);
     }
+    if has_php_stub_content_signal(input) {
+        let language = rootlight_discovery::php_stub_content_language(input)?;
+        return analyzers.contains_key(language).then_some(language);
+    }
     if has_sparql_update_content_signal(input) {
         let language = sparql_update_content_language(input)?;
         return analyzers.contains_key(language).then_some(language);
@@ -20320,6 +20324,9 @@ fn detected_source_language(input: &ManifestInput) -> Option<&str> {
         let canonical = canonical_language(&language.language).unwrap_or(&language.language);
         return (!configured.any(|other| other.language != language.language)).then_some(canonical);
     }
+    if has_php_stub_content_signal(input) {
+        return rootlight_discovery::php_stub_content_language(input);
+    }
     if has_sparql_update_content_signal(input) {
         return sparql_update_content_language(input);
     }
@@ -20401,6 +20408,17 @@ fn detected_source_language(input: &ManifestInput) -> Option<&str> {
         }
     }
     None
+}
+
+fn has_php_stub_content_signal(input: &ManifestInput) -> bool {
+    Path::new(&input.path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("stub"))
+        && input
+            .language_signals
+            .iter()
+            .any(|signal| signal.language == "php" && signal.evidence == LanguageEvidence::Content)
 }
 
 fn has_sparql_update_content_signal(input: &ManifestInput) -> bool {

@@ -95,7 +95,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.108";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.109";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -2242,7 +2242,13 @@ fn classify_with_text_evidence(
     }
     // A complete JSON object has no executable header outside its strings.
     // Generic code hints must not mine schema annotations or example payloads.
-    let content_hint = if sparql_update {
+    let content_hint = if validated_text
+        && normalized.ends_with(".stub")
+        && php_stub_opening_tag(content, prefix_truncated)
+    {
+        // The authored opening tag outranks C++-like class syntax in PHP templates.
+        Some("php")
+    } else if sparql_update {
         None
     } else if let Some(roots) = xml_companion_roots(&normalized) {
         text_evidence
@@ -3290,7 +3296,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         language: "php",
         suffixes: &[".blade.php", ".php"],
         aliases: &[],
-        detectors: &["extension"],
+        detectors: &["extension", "content"],
         maximum_tier: "tier_b",
         analyzers: &["treesitter", "project-adapter"],
     },
@@ -3627,6 +3633,55 @@ pub fn terminal_tt_content_language(input: &ManifestInput) -> Option<&str> {
         (signal.evidence == LanguageEvidence::Content && signal.language == "erb")
             .then_some(signal.language.as_str())
     })
+}
+
+/// Selects PHP for a terminal `.stub` with an unopposed opening-tag content claim.
+///
+/// Callers apply explicit configuration first. The claim establishes the source
+/// language, not valid PHP syntax or resolved generator placeholders. Other stub
+/// dialects, unsupported encodings and conflicting language evidence remain unproven.
+#[must_use]
+pub fn php_stub_content_language(input: &ManifestInput) -> Option<&str> {
+    if !input
+        .path
+        .rsplit(['/', '\\'])
+        .next()
+        .and_then(|name| name.rsplit_once('.'))
+        .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("stub"))
+        || !matches!(input.encoding.as_str(), "utf-8" | "utf-16le" | "utf-16be")
+        || input
+            .language_signals
+            .iter()
+            .any(|signal| signal.language != "php")
+        || input
+            .project_language_witnesses
+            .iter()
+            .any(|witness| witness.language != "php")
+    {
+        return None;
+    }
+    input.language_signals.iter().find_map(|signal| {
+        (signal.evidence == LanguageEvidence::Content && signal.language == "php")
+            .then_some(signal.language.as_str())
+    })
+}
+
+fn php_stub_opening_tag(content: &[u8], prefix_truncated: bool) -> bool {
+    let sample = &content[..content.len().min(MAX_CLASSIFICATION_BYTES)];
+    if sample.contains(&0) {
+        return false;
+    }
+    let source = sample
+        .strip_prefix(b"\xef\xbb\xbf")
+        .unwrap_or(sample)
+        .trim_ascii_start();
+    source
+        .get(..5)
+        .is_some_and(|tag| tag.eq_ignore_ascii_case(b"<?php"))
+        && source.get(5).map_or(
+            !prefix_truncated && content.len() <= MAX_CLASSIFICATION_BYTES,
+            u8::is_ascii_whitespace,
+        )
 }
 
 fn tt_erb_content_hint(content: &[u8], prefix_truncated: bool) -> bool {
@@ -5453,6 +5508,229 @@ max_source_file_bytes = 2097152
         legacy.as_object_mut().unwrap().remove("encoding");
         let legacy: ManifestInput = serde_json::from_value(legacy).unwrap();
         assert_eq!(legacy.encoding, "utf-8");
+    }
+
+    #[test]
+    fn php_stub_opening_tags_override_generic_class_content_hints() {
+        let path = RelativePath::parse(Path::new("stubs/database.stub")).unwrap();
+        assert_eq!(extension_language(path.as_str()), None);
+        for source in [
+            "<?php\nnamespace Example;\nclass Sample {}\n",
+            "<?php\nreturn [];\n",
+            "<?php\nnamespace {{ namespace }};\nclass {{ class }} {}\n",
+            "\u{feff}\t \r\n<?PHP\r\nreturn [];\r\n",
+            "<?php",
+        ] {
+            let (_, signals) = classify(&path, source.as_bytes());
+            assert_eq!(
+                signals,
+                vec![LanguageSignal {
+                    language: "php".to_owned(),
+                    evidence: LanguageEvidence::Content,
+                }],
+                "{source}"
+            );
+        }
+        let capability = language_capabilities()
+            .iter()
+            .find(|capability| capability.language == "php")
+            .unwrap();
+        assert!(capability.detectors.contains(&"content"));
+        assert!(!capability.suffixes.contains(&".stub"));
+    }
+
+    #[test]
+    fn php_stub_content_hints_require_terminal_suffix_and_real_opening_tag() {
+        for path in [
+            "database.stub.bak",
+            "database.stub.cpp",
+            "directory.stub/database",
+            "database.php",
+        ] {
+            let (_, signals) = classify(
+                &RelativePath::parse(Path::new(path)).unwrap(),
+                b"<?php\nnamespace Example;\nclass Sample {}\n",
+            );
+            assert!(
+                !signals.iter().any(|signal| {
+                    signal.language == "php" && signal.evidence == LanguageEvidence::Content
+                }),
+                "{path}"
+            );
+        }
+        let path = RelativePath::parse(Path::new("sample.STUB")).unwrap();
+        for source in [
+            "// <?php\nclass Sample {};\n",
+            "/* <?php */\nclass Sample {};\n",
+            "\"<?php\";\n",
+            "```php\n<?php\nreturn [];\n```\n",
+            "<?phpSuffix class Sample {}\n",
+            "<?php_class Sample {}\n",
+            "<?phpÉ\n",
+            "<?= $value ?>\n",
+            "export default class Sample {}\n",
+            "@extends('layout')\n@section('content')\n",
+            "<html><body><?php echo 'value'; ?></body></html>\n",
+            "namespace Example { class Sample {}; }\n",
+        ] {
+            let (_, signals) = classify(&path, source.as_bytes());
+            assert!(
+                !signals.iter().any(|signal| signal.language == "php"),
+                "{source}"
+            );
+        }
+        let (_, cpp) = classify(&path, b"namespace Example {\nclass Sample {};\n}\n");
+        assert!(
+            cpp.iter()
+                .any(|signal| signal.language == "cpp"
+                    && signal.evidence == LanguageEvidence::Content)
+        );
+    }
+
+    #[test]
+    fn php_stub_content_hints_require_validated_text_and_complete_tag_boundary() {
+        let path = RelativePath::parse(Path::new("sample.stub")).unwrap();
+        for (source, truncated, validated, accepted) in [
+            (b"<?php".as_slice(), false, true, true),
+            (b"<?php".as_slice(), true, true, false),
+            (b"<?php ".as_slice(), true, true, true),
+            (b"<?ph".as_slice(), true, true, false),
+            (b"<?php\n".as_slice(), false, false, false),
+            (b"<?php\0".as_slice(), false, true, false),
+        ] {
+            let (_, signals) =
+                classify_validated_prefix(&path, source, truncated, false, validated);
+            assert_eq!(
+                signals.iter().any(|signal| signal.language == "php"),
+                accepted,
+                "{source:?}; truncated={truncated}; validated={validated}"
+            );
+        }
+        let mut beyond_sample = vec![b' '; MAX_CLASSIFICATION_BYTES];
+        beyond_sample.extend_from_slice(b"<?php\n");
+        assert!(!php_stub_opening_tag(&beyond_sample, false));
+    }
+
+    #[test]
+    fn php_stub_routing_requires_unopposed_positive_content_evidence() {
+        let temporary = local_tempdir();
+        write_fixture(&temporary, "database.stub", b"<?php\nreturn [];\n");
+        let root = fixture_root(&temporary, b"php-stub-content-route");
+        let manifest = discover(
+            &root,
+            &config(),
+            &DiscoveryPolicy::build(Vec::new(), true).unwrap(),
+            limits(),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        let input = &manifest.inputs[0];
+        assert_eq!(php_stub_content_language(input), Some("php"));
+        for evidence in [
+            LanguageEvidence::Extension,
+            LanguageEvidence::Filename,
+            LanguageEvidence::Shebang,
+            LanguageEvidence::Content,
+            LanguageEvidence::Configuration,
+            LanguageEvidence::Project,
+        ] {
+            let mut conflicting = input.clone();
+            conflicting.language_signals.push(LanguageSignal {
+                language: "cpp".to_owned(),
+                evidence,
+            });
+            assert_eq!(
+                php_stub_content_language(&conflicting),
+                None,
+                "{evidence:?}"
+            );
+        }
+        for path in [
+            "database.stub.bak",
+            "database.stub.php",
+            "directory.stub/input",
+        ] {
+            let mut other = input.clone();
+            other.path = path.to_owned();
+            assert_eq!(php_stub_content_language(&other), None, "{path}");
+        }
+        for encoding in ["bytes", "binary", "unsupported"] {
+            let mut opaque = input.clone();
+            opaque.encoding = encoding.to_owned();
+            assert_eq!(php_stub_content_language(&opaque), None, "{encoding}");
+        }
+        let mut unproven = input.clone();
+        unproven.language_signals[0].evidence = LanguageEvidence::Extension;
+        assert_eq!(php_stub_content_language(&unproven), None);
+        let mut conflicting_project = input.clone();
+        conflicting_project
+            .project_language_witnesses
+            .push(ProjectLanguageWitness {
+                language: "fsharp".to_owned(),
+                project_file: input.file,
+                project_path: "project.fsproj".to_owned(),
+                project_content_hash: input.content_hash,
+            });
+        assert_eq!(php_stub_content_language(&conflicting_project), None);
+    }
+
+    #[test]
+    fn php_stub_content_preserves_configuration_and_encoding_boundaries() {
+        let temporary = local_tempdir();
+        let source = "<?php\r\nreturn [];\r\n";
+        write_fixture(&temporary, "configured.stub", source.as_bytes());
+        write_fixture(&temporary, "binary.stub", b"<?php\0binary");
+        write_fixture(&temporary, "invalid.stub", b"<?php\n\xff");
+        let mut utf16 = vec![0xff, 0xfe];
+        utf16.extend(source.encode_utf16().flat_map(u16::to_le_bytes));
+        write_fixture(&temporary, "encoded.stub", &utf16);
+        let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+            source: rootlight_config::ConfigSource::User,
+            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.paths]\n'configured.stub'='cpp'\n",
+        }])
+        .unwrap();
+        let root = fixture_root(&temporary, b"php-stub-policy-boundaries");
+        let manifest = discover(
+            &root,
+            &config,
+            &DiscoveryPolicy::build(Vec::new(), true).unwrap(),
+            DiscoveryLimits::from_config(&config),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert!(manifest.exclusions.iter().any(|entry| {
+            entry.path == "binary.stub" && entry.reason == ExclusionReason::Binary
+        }));
+        let configured = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "configured.stub")
+            .unwrap();
+        assert!(configured.language_signals.iter().any(|signal| {
+            signal.language == "cpp" && signal.evidence == LanguageEvidence::Configuration
+        }));
+        assert_eq!(php_stub_content_language(configured), None);
+        let encoded = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "encoded.stub")
+            .unwrap();
+        assert_eq!(encoded.encoding, "utf-16le");
+        assert_eq!(encoded.content_hash, content_hash(&utf16));
+        assert_eq!(php_stub_content_language(encoded), Some("php"));
+        let invalid = manifest
+            .inputs
+            .iter()
+            .find(|input| input.path == "invalid.stub")
+            .unwrap();
+        assert_eq!(invalid.encoding, "bytes");
+        assert!(
+            !invalid
+                .language_signals
+                .iter()
+                .any(|signal| signal.language == "php")
+        );
+        assert_eq!(php_stub_content_language(invalid), None);
     }
 
     #[test]
