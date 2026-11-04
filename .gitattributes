@@ -431,3 +431,6 @@ third_party/tree-sitter-idris-0.0.1/** -text
 
 # Preserve the licensed Laravel originals and physical PHP stub coordinates.
 /crates/rootlight-service/tests/fixtures/laravel-stubs/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
+
+# Preserve licensed JSONC configuration witnesses and physical coordinates.
+/crates/rootlight-service/tests/fixtures/jsonc-configs/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol

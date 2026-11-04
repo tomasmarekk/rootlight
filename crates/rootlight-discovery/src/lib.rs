@@ -95,7 +95,7 @@ pub use incremental::{
 };
 
 /// Current deterministic manifest and source-classification revision.
-pub const DISCOVERY_MANIFEST_VERSION: &str = "1.109";
+pub const DISCOVERY_MANIFEST_VERSION: &str = "1.110";
 /// Stable source-free diagnostic emitted when the entry budget truncates discovery.
 pub const DISCOVERY_ENTRY_LIMIT_DIAGNOSTIC_CODE: &str = "DISCOVERY_ENTRY_LIMIT";
 /// Stable source-free diagnostic emitted when retained source bytes truncate discovery.
@@ -3096,7 +3096,7 @@ const LANGUAGE_CAPABILITIES: &[LanguageCapability] = &[
         language: "jsonc",
         suffixes: &[".jsonc"],
         aliases: &[],
-        detectors: &["extension"],
+        detectors: &["extension", "filename"],
         maximum_tier: "tier_d",
         analyzers: &["treesitter"],
     },
@@ -3698,10 +3698,11 @@ fn tt_erb_content_hint(content: &[u8], prefix_truncated: bool) -> bool {
     content[start + 2..].windows(2).any(|pair| pair == b"%>")
 }
 
-/// Returns the source language of an exact conventional basename.
+/// Returns the source language of an exact conventional filename or path.
 ///
 /// Most conventions are ASCII-case-insensitive and accept either separator.
 /// CODEOWNERS uses exact casing at the repository root, `.github` or `docs`.
+/// Dev Container `devcontainer.json` requires its conventional directory context.
 /// Backup suffixes and directory names do not match; contents are not inspected.
 #[must_use]
 pub fn filename_language(path: &str) -> Option<&'static str> {
@@ -3715,6 +3716,11 @@ pub fn filename_language(path: &str) -> Option<&'static str> {
             | "docs\\CODEOWNERS"
     ) {
         Some("codeowners")
+    } else if name.eq_ignore_ascii_case("tsconfig.json")
+        || name.eq_ignore_ascii_case(".devcontainer.json")
+        || (name.eq_ignore_ascii_case("devcontainer.json") && devcontainer_directory(path))
+    {
+        Some("jsonc")
     } else if name.eq_ignore_ascii_case("Dockerfile") {
         Some("dockerfile")
     } else if name == "meson.build" {
@@ -3733,6 +3739,18 @@ pub fn filename_language(path: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+fn devcontainer_directory(path: &str) -> bool {
+    let mut parents = path.rsplit(['/', '\\']).skip(1);
+    let Some(parent) = parents.next() else {
+        return false;
+    };
+    parent.eq_ignore_ascii_case(".devcontainer")
+        || (!matches!(parent, "" | "." | "..")
+            && parents
+                .next()
+                .is_some_and(|directory| directory.eq_ignore_ascii_case(".devcontainer")))
 }
 
 /// Reports a BASIC-family suffix that needs dialect evidence before parser admission.
@@ -7768,16 +7786,87 @@ max_source_file_bytes = 2097152
     }
 
     #[test]
+    fn jsonc_conventional_filenames_require_exact_names_and_directory_context() {
+        for path in [
+            "tsconfig.json",
+            "packages/view/tsconfig.json",
+            "packages\\view\\TSCONFIG.JSON",
+            ".devcontainer.json",
+            "examples/project/.DEVCONTAINER.JSON",
+            ".devcontainer/devcontainer.json",
+            "examples/project/.devcontainer/devcontainer.json",
+            ".devcontainer/python/devcontainer.json",
+            "examples\\project\\.DEVCONTAINER\\python\\DEVCONTAINER.JSON",
+        ] {
+            assert_eq!(filename_language(path), Some("jsonc"), "{path}");
+            assert_eq!(extension_language(path), Some("json"), "{path}");
+        }
+        for path in [
+            "data.json",
+            "package.json",
+            "tsconfig.build.json",
+            "mytsconfig.json",
+            "tsconfig.json.bak",
+            "tsconfig.json/source.json",
+            "devcontainer.json",
+            "assets/devcontainer.json",
+            "devcontainer/devcontainer.json",
+            ".devcontainers/devcontainer.json",
+            ".devcontainerish/devcontainer.json",
+            ".devcontainer/python/nested/devcontainer.json",
+            ".devcontainer//devcontainer.json",
+            ".devcontainer/./devcontainer.json",
+            ".devcontainer/../devcontainer.json",
+            ".devcontainer/devcontainer.json.bak",
+            ".devcontainer.json.bak",
+        ] {
+            assert_eq!(filename_language(path), None, "{path}");
+        }
+        let (_, signals) = classify(
+            &RelativePath::parse(Path::new("packages/view/tsconfig.json")).unwrap(),
+            b"// authored comment\n{\"compilerOptions\":{},}\n",
+        );
+        for (language, evidence) in [
+            ("json", LanguageEvidence::Extension),
+            ("jsonc", LanguageEvidence::Filename),
+            ("typescript", LanguageEvidence::Manifest),
+        ] {
+            assert!(
+                signals
+                    .iter()
+                    .any(|signal| { signal.language == language && signal.evidence == evidence }),
+                "{signals:?}"
+            );
+        }
+        let (_, ordinary_signals) = classify(
+            &RelativePath::parse(Path::new("data.json")).unwrap(),
+            b"// authored comment\n{\"key\":1,}\n",
+        );
+        assert!(
+            !ordinary_signals
+                .iter()
+                .any(|signal| signal.language == "jsonc")
+        );
+    }
+
+    #[test]
     fn jsonc_discovery_preserves_physical_sources_and_configuration_precedence() {
         let temporary = local_tempdir();
         let contents = b"// authored comment\r\n{\"key\":[1,],}\r\n";
         write_fixture(&temporary, "settings.JSONC", contents);
         write_fixture(&temporary, "assigned.conf", contents);
+        write_fixture(&temporary, "config/tsconfig.json", contents);
+        write_fixture(
+            &temporary,
+            ".devcontainer/python/devcontainer.json",
+            contents,
+        );
         write_fixture(&temporary, "overridden.jsonc", b"fn typed() {}\n");
+        write_fixture(&temporary, "overridden/tsconfig.json", b"fn typed() {}\n");
         write_fixture(&temporary, "binary.jsonc", b"\0binary");
         let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
             source: rootlight_config::ConfigSource::User,
-            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nconf='jsonc'\n[extensions.source-languages.data.paths]\n'overridden.jsonc'='rust'\n",
+            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\nconf='jsonc'\n[extensions.source-languages.data.paths]\n'overridden.jsonc'='rust'\n'overridden/tsconfig.json'='rust'\n",
         }]).unwrap();
         let root = fixture_root(&temporary, b"jsonc-discovery");
         let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
@@ -7789,14 +7878,25 @@ max_source_file_bytes = 2097152
             &Cancellation::new(),
         )
         .unwrap();
-        assert_eq!(manifest.inputs.len(), 3);
+        assert_eq!(manifest.inputs.len(), 6);
         assert_eq!(manifest.exclusions.len(), 1);
         assert_eq!(manifest.exclusions[0].path, "binary.jsonc");
         assert_eq!(manifest.exclusions[0].reason, ExclusionReason::Binary);
         for (path, language, evidence) in [
             ("settings.JSONC", "jsonc", LanguageEvidence::Extension),
             ("assigned.conf", "jsonc", LanguageEvidence::Configuration),
+            ("config/tsconfig.json", "jsonc", LanguageEvidence::Filename),
+            (
+                ".devcontainer/python/devcontainer.json",
+                "jsonc",
+                LanguageEvidence::Filename,
+            ),
             ("overridden.jsonc", "rust", LanguageEvidence::Configuration),
+            (
+                "overridden/tsconfig.json",
+                "rust",
+                LanguageEvidence::Configuration,
+            ),
         ] {
             let input = manifest
                 .inputs
@@ -7824,6 +7924,39 @@ max_source_file_bytes = 2097152
             .unwrap();
         assert_eq!(capability.maximum_tier, "tier_d");
         assert_eq!(capability.analyzers, &["treesitter"]);
+        assert_eq!(capability.detectors, &["extension", "filename"]);
+    }
+
+    #[test]
+    fn jsonc_conventional_filenames_keep_explicit_extension_configuration() {
+        let temporary = local_tempdir();
+        let contents = b"// authored comment\r\n{\"key\":[1,],}\r\n";
+        for path in ["tsconfig.json", ".devcontainer/devcontainer.json"] {
+            write_fixture(&temporary, path, contents);
+        }
+        let config = ConfigSnapshot::resolve(&[rootlight_config::ConfigLayer {
+            source: rootlight_config::ConfigSource::User,
+            contents: "version='1.3'\n[extensions.source-languages]\nversion='1.0'\ncritical=true\n[extensions.source-languages.data.extensions]\njson='rust'\n",
+        }]).unwrap();
+        let root = fixture_root(&temporary, b"jsonc-extension-configuration");
+        let policy = DiscoveryPolicy::build(Vec::new(), true).unwrap();
+        let manifest = discover(
+            &root,
+            &config,
+            &policy,
+            DiscoveryLimits::from_config(&config),
+            &Cancellation::new(),
+        )
+        .unwrap();
+        assert_eq!(manifest.inputs.len(), 2);
+        assert!(manifest.exclusions.is_empty());
+        for input in &manifest.inputs {
+            assert!(input.language_signals.iter().any(|signal| {
+                signal.language == "rust" && signal.evidence == LanguageEvidence::Configuration
+            }));
+            assert_eq!(input.content_hash, rootlight_ids::content_hash(contents));
+            assert_eq!(input.bytes, u64::try_from(contents.len()).unwrap());
+        }
     }
 
     #[test]
