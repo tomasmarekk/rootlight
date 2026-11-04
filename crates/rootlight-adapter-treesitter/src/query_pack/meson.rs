@@ -423,6 +423,85 @@ mod tests {
     }
 
     #[test]
+    fn literal_boundaries_preserve_empty_values_quotes_and_following_comments() {
+        for literal in [
+            "''",
+            "f''",
+            "''''''",
+            "f''''''",
+            "'# header'",
+            "f'#@value@'",
+            "'''one ' quote and two '' quotes # text'''",
+            "f'''one ' quote and two '' quotes #@value@'''",
+        ] {
+            let source = format!("value = {literal} # actual comment\n");
+            let parsed = tree(source.as_bytes());
+            let root = parsed.root_node();
+            assert_eq!(root.kind(), "build_definition", "{source}");
+            assert!(!root.has_error(), "{source}: {}", root.to_sexp());
+            let comment_start = source.find("# actual comment").unwrap();
+            let comment = root
+                .descendant_for_byte_range(comment_start, source.len() - 1)
+                .unwrap();
+            assert_eq!(comment.kind(), "comment", "{source}");
+            assert_eq!(comment.start_byte(), comment_start, "{source}");
+            let literal_start = "value = ".len();
+            let value = root
+                .descendant_for_byte_range(literal_start, literal_start + literal.len())
+                .unwrap();
+            assert_eq!(
+                value.kind(),
+                if literal.starts_with('f') {
+                    "fstring_literal"
+                } else {
+                    "string_literal"
+                },
+                "{source}"
+            );
+            assert_eq!(value.start_byte(), literal_start, "{source}");
+            assert_eq!(value.end_byte(), literal_start + literal.len(), "{source}");
+        }
+    }
+
+    #[test]
+    fn inline_comment_ownership_starts_after_the_closed_literal() {
+        let source = b"value = '# literal' # actual comment\n";
+        let parsed = tree(source);
+        let root = parsed.root_node();
+        assert!(!root.has_error());
+        let literal = root.descendant_for_byte_range(8, 19).unwrap();
+        assert_eq!(literal.kind(), "string_literal");
+        assert_eq!(&source[literal.byte_range()], b"'# literal'");
+        let comment = root
+            .descendant_for_byte_range(20, source.len() - 1)
+            .unwrap();
+        assert_eq!(comment.kind(), "comment");
+        assert_eq!(&source[comment.byte_range()], b"# actual comment");
+    }
+
+    #[test]
+    fn comments_preserve_statement_terminators_and_multiline_argument_boundaries() {
+        for source in [
+            b"# comment at EOF".as_ref(),
+            b"# comment only\n".as_ref(),
+            b"value = '# literal' # actual comment\nnext = 1\n".as_ref(),
+            b"value = '# literal' # actual comment\r\nnext = 1\r\n".as_ref(),
+            b"items = [\n  '# first', # item comment\n  'second',\n]\n".as_ref(),
+            b"value = probe(\n  '# first', # argument comment\n  'second',\n)\n".as_ref(),
+        ] {
+            let parsed = tree(source);
+            let root = parsed.root_node();
+            assert_eq!(root.kind(), "build_definition");
+            assert!(
+                !root.has_error(),
+                "{}: {}",
+                String::from_utf8_lossy(source),
+                root.to_sexp()
+            );
+        }
+    }
+
+    #[test]
     fn original_valid_file_keeps_only_clean_native_assignment_and_iterable_authority() {
         let source = include_bytes!("../../tests/fixtures/meson/meson.build");
         let parsed = tree(source);

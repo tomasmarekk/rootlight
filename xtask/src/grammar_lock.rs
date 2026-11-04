@@ -19,7 +19,7 @@ const GRAMMAR_LOCK_PATH: &str = "adapters/grammars.lock";
 const CARGO_LOCK_PATH: &str = "Cargo.lock";
 const ADAPTER_PACKAGE: &str = "rootlight-adapter-treesitter";
 const GRAMMAR_LOCK_SHA256: &str =
-    "accbfb31c27b0d0fbee73e620a0a75a0cbe7dd0d2387d14a80b55789fa58adca";
+    "5662a49d10acf7264001659b749454e5f571a7a261d4b2e0eeae400acf2aba72";
 const JAVA_LICENSE_PATH: &str = "adapters/licenses/tree-sitter-java-0.23.5-LICENSE";
 const JAVA_LICENSE_SHA256: &str =
     "52ed137b039cd9c46409bc22e89938af911c95b157feae2d040b51e6084369a7";
@@ -376,7 +376,7 @@ const EXPECTED_LOCAL_PACKAGES: [(&str, &str, &str, &str); 75] = [
         "tree-sitter-meson",
         "1.0.0",
         "third_party/tree-sitter-meson-1.0.0",
-        "ca6c6f0707c6fd979f97cad725207f13d27e254d33a6176c01b8ad50f060535e",
+        "431a8a53e397b7dcd14bb8ef72408622745b7dd9355201bdf46fcf4fae5b659b",
     ),
     (
         "tree-sitter-gdscript",

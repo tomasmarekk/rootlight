@@ -20,6 +20,8 @@
   "generation": "GENERATION.json",
   "local_changes": [
     "Active grammar admits authored trailing list commas and expression-valued foreach iterables; original upstream files remain unchanged.",
-    "ABI14 active tables regenerated during preparation with the retained pinned Tree-sitter CLI."
+    "ABI14 active tables regenerated during preparation with the retained pinned Tree-sitter CLI.",
+    "Immediate quoted content, escapes and delimiters keep whitespace and hashes inside ordinary, formatted and raw triple strings; named escape nodes remain distinct.",
+    "Comment tokens leave newlines to their owning statements and accept comment-only end-of-file input."
   ]
 }

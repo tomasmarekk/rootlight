@@ -24,8 +24,8 @@ module.exports = grammar({
   rules: {
     build_definition: ($) => repeat(choice("\n", $.statement)),
 
-    // comments
-    comment: (_$) => seq("#", /[^\n]*/, "\n"),
+    // Statements own their newline even when followed by a comment.
+    comment: (_$) => seq("#", /[^\n]*/),
 
     // keywords
     if: (_$) => token("if"),
@@ -55,14 +55,27 @@ module.exports = grammar({
         )
       ),
 
+    // Quoted bodies own their whitespace and hashes; global extras must not run inside them.
     string_literal: ($) =>
       choice(
         seq(
           "'",
-          repeat(choice($.escape_sequence, /[^'\\]/, $.bad_escape)),
-          "'"
+          repeat(
+            choice($.escape_sequence, token.immediate(/[^'\\]+/), $.bad_escape)
+          ),
+          token.immediate("'")
         ),
-        seq("'''", repeat(/./), "'''")
+        seq(
+          "'''",
+          repeat(
+            choice(
+              token.immediate(/[^']+/),
+              token.immediate(/'[^']/),
+              token.immediate(/''[^']/)
+            )
+          ),
+          token.immediate("'''")
+        )
       ),
 
     // formatted strings - we don't match out the parameters
@@ -71,36 +84,50 @@ module.exports = grammar({
       choice(
         seq(
           "f'",
-          repeat(choice($.escape_sequence, /[^'\\]/, $.bad_escape)),
-          "'"
+          repeat(
+            choice($.escape_sequence, token.immediate(/[^'\\]+/), $.bad_escape)
+          ),
+          token.immediate("'")
         ),
-        seq("f'''", repeat(/./), "'''")
+        seq(
+          "f'''",
+          repeat(
+            choice(
+              token.immediate(/[^']+/),
+              token.immediate(/'[^']/),
+              token.immediate(/''[^']/)
+            )
+          ),
+          token.immediate("'''")
+        )
       ),
 
     // known supported escape sequences
     escape_sequence: (_$) =>
-      prec(
-        1,
-        choice(
-          "\\\\",
-          "\\'",
-          "\\a",
-          "\\b",
-          "\\f",
-          "\\n",
-          "\\r",
-          "\\t",
-          "\\v",
-          /\\x[0-9A-Fa-f]{2}/,
-          /\\u[0-9A-Fa-f]{4}/,
-          /\\U[0-9A-Fa-f]{8}/,
-          /\\[0-7]{1,3}/, // octal
-          /\\N\{[A-Za-z- ]+\}/ // unicode named characters
+      token.immediate(
+        prec(
+          1,
+          choice(
+            "\\\\",
+            "\\'",
+            "\\a",
+            "\\b",
+            "\\f",
+            "\\n",
+            "\\r",
+            "\\t",
+            "\\v",
+            /\\x[0-9A-Fa-f]{2}/,
+            /\\u[0-9A-Fa-f]{4}/,
+            /\\U[0-9A-Fa-f]{8}/,
+            /\\[0-7]{1,3}/, // octal
+            /\\N\{[A-Za-z- ]+\}/ // unicode named characters
+          )
         )
       ),
 
     // we call these out so that they can be marked invalid
-    bad_escape: (_$) => prec(-1, /\\[^\\'abfnrtvxuUN\n]/),
+    bad_escape: (_$) => token.immediate(prec(-1, /\\[^\\'abfnrtvxuUN\n]/)),
 
     array_literal: ($) => seq("[", optional($._expression_list), "]"),
 

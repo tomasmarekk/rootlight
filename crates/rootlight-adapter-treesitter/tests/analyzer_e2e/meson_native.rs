@@ -4,6 +4,7 @@
 use super::*;
 
 const ORIGINAL: &[u8] = include_bytes!("../fixtures/meson/meson.build");
+const TAGLIB: &[u8] = include_bytes!("../fixtures/meson/taglib.build");
 const MESON: LanguageCase = LanguageCase {
     name: "meson",
     path: "meson.build",
@@ -172,6 +173,106 @@ fn original_valid_lists_and_iterables_parse_without_claiming_project_evaluation(
         vec![516, 536, 557, 1086]
     );
     assert!(!ORIGINAL.windows(b"__rootlight_absent_d55ee6fd754af45ab2bd76778d404276df7e00db1a03af6b26321cd266131c41__".len()).any(|value|value==b"__rootlight_absent_d55ee6fd754af45ab2bd76778d404276df7e00db1a03af6b26321cd266131c41__"));
+}
+
+#[test]
+fn original_quoted_headers_preserve_variables_without_inventing_comments() {
+    assert_eq!(TAGLIB.len(), 1855);
+    let result = output(TAGLIB, EncodingId::utf8());
+    assert!(
+        !result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| { gap.reason == SkippedRegionReason::ParseError })
+    );
+    let text = std::str::from_utf8(TAGLIB).unwrap();
+    for name in ["cpp", "cdata", "zlib_dep", "tcdata"] {
+        let marker = format!("\n{name} = ");
+        let start = text.find(&marker).unwrap() + 1;
+        definition(
+            &result,
+            name,
+            u64::try_from(start).unwrap(),
+            u64::try_from(start + name.len()).unwrap(),
+        );
+    }
+    assert!(
+        !result
+            .document()
+            .occurrences
+            .iter()
+            .any(|site| { site.role == OccurrenceRole::Documentation })
+    );
+    assert!(
+        !result
+            .document()
+            .relations
+            .iter()
+            .any(|relation| { relation.predicate == RelationPredicate::Calls })
+    );
+}
+
+#[test]
+fn hashes_and_whitespace_inside_literals_do_not_become_comments_or_bindings() {
+    let bytes = b"value = 'space # literal \\n \\'quoted\\''\nformatted = f'#@value@'\nraw = '''# raw header\n  # raw body\n'''\nraw_formatted = f'''#@value@\n''' # actual comment\nnext = 1\n";
+    let result = output(bytes, EncodingId::utf8());
+    assert!(
+        !result
+            .document()
+            .skipped_regions
+            .iter()
+            .any(|gap| { gap.reason == SkippedRegionReason::ParseError })
+    );
+    let text = std::str::from_utf8(bytes).unwrap();
+    for name in ["value", "formatted", "raw", "raw_formatted", "next"] {
+        let marker = format!("{name} = ");
+        let start = text.find(&marker).unwrap();
+        definition(
+            &result,
+            name,
+            u64::try_from(start).unwrap(),
+            u64::try_from(start + name.len()).unwrap(),
+        );
+    }
+    let comments: Vec<_> = result
+        .document()
+        .occurrences
+        .iter()
+        .filter(|site| site.role == OccurrenceRole::Documentation)
+        .collect();
+    assert_eq!(comments.len(), 1);
+    let source = &comments[0].source;
+    let start = usize::try_from(source.span().start_byte()).unwrap();
+    let end = usize::try_from(source.span().end_byte()).unwrap();
+    assert_eq!(&bytes[start..end], b"# actual comment");
+    assert!(!result.document().relations.iter().any(|relation| {
+        matches!(
+            relation.predicate,
+            RelationPredicate::Calls | RelationPredicate::RefersTo
+        )
+    }));
+}
+
+#[test]
+fn unterminated_quoted_hashes_keep_explicit_recovery() {
+    for bytes in [
+        b"value = '# unterminated\n".as_ref(),
+        b"value = '''# unterminated\n".as_ref(),
+        b"value = f'# unterminated\n".as_ref(),
+        b"value = f'''# unterminated\n".as_ref(),
+    ] {
+        let result = output(bytes, EncodingId::utf8());
+        assert!(
+            result
+                .document()
+                .skipped_regions
+                .iter()
+                .any(|gap| { gap.reason == SkippedRegionReason::ParseError }),
+            "{}",
+            String::from_utf8_lossy(bytes)
+        );
+    }
 }
 
 #[test]

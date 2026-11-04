@@ -12,6 +12,13 @@ A single trailing-comma boundary for mixed arguments does not admit empty or
 repeated arguments. The hidden expression rule preserves direct bare-name iterable
 children so lexical binding proofs can distinguish them from unevaluated values.
 
+Quoted content, named escapes and closing delimiters use immediate tokens. Global
+whitespace and comment extras cannot consume literal spaces or hashes inside
+ordinary or formatted strings. Raw triple strings retain authored whitespace and
+newlines, including embedded quote characters, without producing comment nodes.
+Comment tokens stop before the newline so trailing comments cannot consume the
+statement terminator; comment-only input also remains valid at end of file.
+
 `GENERATION.json` binds the reviewed grammar and ABI14 parser, node metadata and
 headers to the retained Tree-sitter CLI 0.26.8 maintainer tool. Generation occurs
 only during source preparation. The active generated tables live under `src/`;

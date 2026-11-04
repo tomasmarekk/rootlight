@@ -78,11 +78,6 @@
     }
   },
   {
-    "type": "bad_escape",
-    "named": true,
-    "fields": {}
-  },
-  {
     "type": "build_definition",
     "named": true,
     "root": true,
@@ -191,11 +186,6 @@
   },
   {
     "type": "equality_operator",
-    "named": true,
-    "fields": {}
-  },
-  {
-    "type": "escape_sequence",
     "named": true,
     "fields": {}
   },
@@ -920,47 +910,15 @@
     "named": false
   },
   {
-    "type": "\\'",
-    "named": false
-  },
-  {
-    "type": "\\\\",
-    "named": false
-  },
-  {
-    "type": "\\a",
-    "named": false
-  },
-  {
-    "type": "\\b",
-    "named": false
-  },
-  {
-    "type": "\\f",
-    "named": false
-  },
-  {
-    "type": "\\n",
-    "named": false
-  },
-  {
-    "type": "\\r",
-    "named": false
-  },
-  {
-    "type": "\\t",
-    "named": false
-  },
-  {
-    "type": "\\v",
-    "named": false
-  },
-  {
     "type": "]",
     "named": false
   },
   {
     "type": "and",
+    "named": true
+  },
+  {
+    "type": "bad_escape",
     "named": true
   },
   {
@@ -989,6 +947,10 @@
   },
   {
     "type": "endif",
+    "named": true
+  },
+  {
+    "type": "escape_sequence",
     "named": true
   },
   {
