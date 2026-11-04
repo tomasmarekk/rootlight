@@ -428,3 +428,6 @@ third_party/tree-sitter-idris-0.0.1/** -text
 # Retained ABAP grammar inputs, archive and original fixture remain byte-exact.
 /third_party/tree-sitter-abap-0.1.0/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
 /tests/native-grammars/fixtures/abap/** -text
+
+# Preserve the licensed Laravel originals and physical PHP stub coordinates.
+/crates/rootlight-service/tests/fixtures/laravel-stubs/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,cr-at-eol
