@@ -6807,126 +6807,66 @@ mod tests {
     #[test]
     fn reviewed_packs_compile_with_the_exact_closed_capture_contract() {
         let registry = QueryPackRegistry::audited().expect("reviewed packs compile");
-        assert_eq!(registry.len(), 121);
+        let grammars = crate::GrammarRegistry::audited().expect("native registry");
+        let grammar_families = grammars
+            .descriptors()
+            .iter()
+            .map(|descriptor| descriptor.family())
+            .collect::<std::collections::BTreeSet<_>>();
+        let query_families = registry
+            .packs
+            .iter()
+            .map(|(family, _)| *family)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(query_families.len(), registry.packs.len());
+        assert_eq!(query_families, grammar_families);
+        assert_eq!(registry.len(), grammar_families.len() + 2);
         assert_eq!(registry.initialized_count(), registry.len());
 
-        for family in [
-            GrammarFamily::Dql,
-            GrammarFamily::NTriples,
-            GrammarFamily::NQuads,
-            GrammarFamily::NQuadsDgraph,
-            GrammarFamily::Sparql,
-            GrammarFamily::N3,
-            GrammarFamily::Trig,
-            GrammarFamily::Turtle,
-            GrammarFamily::Erb,
-            GrammarFamily::Wesl,
-            GrammarFamily::Ron,
-            GrammarFamily::Nushell,
-            GrammarFamily::Clojure,
-            GrammarFamily::Racket,
-            GrammarFamily::Rust,
-            GrammarFamily::Python,
-            GrammarFamily::JavaScript,
-            GrammarFamily::Java,
-            GrammarFamily::Apex,
-            GrammarFamily::Go,
-            GrammarFamily::TypeScript,
-            GrammarFamily::C,
-            GrammarFamily::Cpp,
-            GrammarFamily::CSharp,
-            GrammarFamily::Kotlin,
-            GrammarFamily::Php,
-            GrammarFamily::Lua,
-            GrammarFamily::Ruby,
-            GrammarFamily::Swift,
-            GrammarFamily::Css,
-            GrammarFamily::Bash,
-            GrammarFamily::Json,
-            GrammarFamily::Jsonc,
-            GrammarFamily::JsonSchema,
-            GrammarFamily::Toml,
-            GrammarFamily::Yaml,
-            GrammarFamily::Html,
-            GrammarFamily::Sql,
-            GrammarFamily::R,
-            GrammarFamily::Solidity,
-            GrammarFamily::Scala,
-            GrammarFamily::Dart,
-            GrammarFamily::PowerShell,
-            GrammarFamily::Markdown,
-            GrammarFamily::Astro,
-            GrammarFamily::ObjectiveC,
-            GrammarFamily::Nix,
-            GrammarFamily::Matlab,
-            GrammarFamily::Perl,
-            GrammarFamily::Groovy,
-            GrammarFamily::Vba,
-            GrammarFamily::VisualBasicClassic,
-            GrammarFamily::Haskell,
-            GrammarFamily::FSharp,
-            GrammarFamily::FSharpSignature,
-            GrammarFamily::CobolFixed,
-            GrammarFamily::CobolFree,
-            GrammarFamily::Fortran,
-            GrammarFamily::PlSql,
-            GrammarFamily::Sas,
-            GrammarFamily::Pascal,
-            GrammarFamily::CommonLisp,
-            GrammarFamily::Scheme,
-            GrammarFamily::Ocaml,
-            GrammarFamily::OcamlInterface,
-            GrammarFamily::Assembly,
-            GrammarFamily::Glsl,
-            GrammarFamily::Hlsl,
-            GrammarFamily::Protobuf,
-            GrammarFamily::Thrift,
-            GrammarFamily::Wgsl,
-            GrammarFamily::Xml,
-            GrammarFamily::Dtd,
-            GrammarFamily::CMake,
-            GrammarFamily::Julia,
-            GrammarFamily::Eiffel,
-            GrammarFamily::Coq,
-            GrammarFamily::V,
-            GrammarFamily::Verilog,
-            GrammarFamily::Vhdl,
-            GrammarFamily::Hcl,
-            GrammarFamily::Ada,
-            GrammarFamily::Dockerfile,
-            GrammarFamily::Coffeescript,
-            GrammarFamily::Idris,
-            GrammarFamily::Sed,
-            GrammarFamily::Wolfram,
-            GrammarFamily::Pug,
-            GrammarFamily::Liquid,
-            GrammarFamily::Handlebars,
-            GrammarFamily::Lean,
-            GrammarFamily::Meson,
-            GrammarFamily::Gdscript,
-            GrammarFamily::Qsharp,
-            GrammarFamily::Chapel,
-            GrammarFamily::StandardMl,
-            GrammarFamily::Wat,
-            GrammarFamily::Mojo,
-            GrammarFamily::Haxe,
-            GrammarFamily::Qml,
-            GrammarFamily::Modelica,
-            GrammarFamily::Ring,
-            GrammarFamily::Hare,
-            GrammarFamily::D,
-            GrammarFamily::Hcl,
-            GrammarFamily::Cue,
-            GrammarFamily::Crystal,
-            GrammarFamily::Pony,
-            GrammarFamily::Fish,
-            GrammarFamily::Nim,
-            GrammarFamily::SystemVerilog,
-        ] {
+        for family in grammar_families {
             let pack = registry.get(family).expect("family has a query pack");
             let mut names = pack.identity_query.capture_names().to_vec();
             names.sort_unstable();
             let mut expected = EXPECTED_CAPTURES.to_vec();
+            if matches!(
+                family,
+                GrammarFamily::Capnp | GrammarFamily::Graphql | GrammarFamily::Elixir
+            ) {
+                expected.retain(|name| !matches!(*name, "call" | "import" | "documentation"));
+                if family == GrammarFamily::Elixir {
+                    expected.retain(|name| *name != "reference");
+                }
+            }
+            if family == GrammarFamily::TypeSpec {
+                expected = vec![
+                    "comment",
+                    "declaration",
+                    "definition",
+                    "expression",
+                    "module",
+                    "root",
+                ];
+            }
+            if matches!(
+                family,
+                GrammarFamily::Abap
+                    | GrammarFamily::VbNet
+                    | GrammarFamily::Vento
+                    | GrammarFamily::Gyp
+            ) {
+                expected.retain(|name| {
+                    !matches!(*name, "call" | "import" | "documentation" | "string")
+                });
+                if matches!(family, GrammarFamily::VbNet | GrammarFamily::Gyp) {
+                    expected.retain(|name| *name != "reference");
+                }
+                if family == GrammarFamily::Gyp {
+                    expected.retain(|name| *name != "scope");
+                }
+                if family == GrammarFamily::Abap {
+                    expected.push("expression");
+                }
+            }
             if matches!(
                 family,
                 GrammarFamily::Dql

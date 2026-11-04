@@ -38,7 +38,8 @@ fn cpp_cuda_pair_initializes_only_its_actual_native_query() {
 #[test]
 fn cold_catalogue_initializes_only_the_requested_factory() {
     let registry = QueryPackRegistry::catalogue();
-    assert_eq!(registry.len(), 121);
+    let grammars = crate::GrammarRegistry::audited().unwrap();
+    assert_eq!(registry.len(), grammars.descriptors().len() + 2);
     assert_eq!(registry.initialized_count(), 0);
     assert_eq!(registry.initialized_pattern_count(), 0);
     for family in [

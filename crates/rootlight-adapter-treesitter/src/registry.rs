@@ -1745,8 +1745,7 @@ mod tests {
     fn registry_contains_each_audited_family_once_with_checked_abi() {
         let registry = GrammarRegistry::audited().expect("audited grammars initialize");
 
-        assert_eq!(registry.descriptors().len(), 119);
-        for family in [
+        let expected_families = [
             GrammarFamily::Dql,
             GrammarFamily::NTriples,
             GrammarFamily::NQuads,
@@ -1756,6 +1755,8 @@ mod tests {
             GrammarFamily::Trig,
             GrammarFamily::Turtle,
             GrammarFamily::TypeSpec,
+            GrammarFamily::Graphql,
+            GrammarFamily::Elixir,
             GrammarFamily::Ron,
             GrammarFamily::Wesl,
             GrammarFamily::Erb,
@@ -1865,7 +1866,16 @@ mod tests {
             GrammarFamily::Verilog,
             GrammarFamily::SystemVerilog,
             GrammarFamily::V,
-        ] {
+        ];
+        let actual_families = registry
+            .descriptors()
+            .iter()
+            .map(GrammarDescriptor::family)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(registry.descriptors().len(), expected_families.len());
+        assert_eq!(actual_families.len(), expected_families.len());
+        assert_eq!(actual_families, expected_families.into_iter().collect());
+        for family in expected_families {
             let descriptor = registry.get(family).expect("family is registered");
             assert!(
                 (TREE_SITTER_MIN_ABI..=TREE_SITTER_MAX_ABI).contains(&descriptor.abi_version())
